@@ -252,7 +252,11 @@ async def to_code(config):
 
 # --- Actions -----------------------------------------------------------------
 
-WEBRTC_ACTION_SCHEMA = cv.Schema({cv.GenerateID(): cv.use_id(WebRTCComponent)})
+# maybe_simple_id lets `webrtc.start: rtc` work as shorthand for
+# `webrtc.start: {id: rtc}` (the plain dict schema rejected the bare id).
+WEBRTC_ACTION_SCHEMA = automation.maybe_simple_id(
+    {cv.GenerateID(): cv.use_id(WebRTCComponent)}
+)
 
 
 @automation.register_action(
