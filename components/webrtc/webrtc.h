@@ -4,6 +4,7 @@
 #include "esphome/core/automation.h"
 #include "esphome/core/helpers.h"
 
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -65,6 +66,9 @@ class WebRTCComponent : public Component {
   void set_audio_direction(MediaDir d) { this->audio_dir_ = d; }
   void set_video_bitrate(uint32_t b) { this->video_bitrate_ = b; }
   void set_audio_bitrate(uint32_t b) { this->audio_bitrate_ = b; }
+  void set_video_width(uint16_t w) { this->video_width_ = w; }
+  void set_video_height(uint16_t h) { this->video_height_ = h; }
+  void set_video_fps(uint8_t f) { this->video_fps_ = f; }
   void set_enable_data_channel(bool e) { this->enable_data_channel_ = e; }
   void set_auto_start(bool a) { this->auto_start_ = a; }
   void add_ice_server(const std::string &url, const std::string &user, const std::string &pass) {
@@ -109,6 +113,9 @@ class WebRTCComponent : public Component {
   MediaDir audio_dir_{MEDIA_DIR_SEND_RECV};
   uint32_t video_bitrate_{0};
   uint32_t audio_bitrate_{0};
+  uint16_t video_width_{1024};
+  uint16_t video_height_{600};
+  uint8_t video_fps_{10};
   bool enable_data_channel_{true};
   bool auto_start_{false};
   std::vector<IceServer> ice_servers_;
@@ -116,12 +123,25 @@ class WebRTCComponent : public Component {
   // Opaque esp_webrtc handle (void * upstream). Kept as void* to avoid
   // leaking the C headers into this header.
   void *rtc_{nullptr};
+  // Heap array of esp_peer_ice_server_cfg_t handed to esp_webrtc_open(). It
+  // (and the IceServer strings it points into) must outlive open_(), so it is
+  // owned by the component, not built on the stack. Opaque here for the same
+  // reason as rtc_.
+  void *ice_cfgs_{nullptr};
+  // Built signaling URL. Must outlive open_() because esp_webrtc keeps the
+  // pointer we pass in cfg.signaling_cfg.signal_url.
+  std::string signal_url_full_;
   bool started_{false};
   bool connected_{false};
+  // auto_start is deferred out of setup() until the network is actually up;
+  // this latches the one-shot attempt so loop() doesn't retry every tick.
+  bool auto_start_attempted_{false};
   uint32_t last_query_{0};
-  // Set from the esp_webrtc task; drained in loop() so triggers run on the
-  // ESPHome main-loop thread.
-  volatile int pending_event_{-1};
+  // Bitmask of pending esp_webrtc events (1 << event_type). Written from the
+  // esp_webrtc task, drained in loop() so triggers run on the ESPHome
+  // main-loop thread. A bitmask (not a single slot) so back-to-back events
+  // like PAIRED then CONNECTED cannot overwrite each other.
+  std::atomic<uint32_t> pending_events_{0};
 
   CallbackManager<void()> on_connected_;
   CallbackManager<void()> on_disconnected_;
