@@ -11,6 +11,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
 from esphome.const import CONF_ID, CONF_TRIGGER_ID, CONF_URL
+from esphome.core import CORE
 
 from esphome.components.esp32 import (
     add_idf_component,
@@ -104,6 +105,13 @@ ICE_SERVER_SCHEMA = cv.Schema(
 
 
 def _validate(config):
+    # ESP-IDF only (esp_webrtc + the camera/codec pipeline are IDF-only).
+    # cv.only_with_esp_idf does not exist in ESPHome; check the framework here.
+    if not CORE.using_esp_idf:
+        raise cv.Invalid(
+            "The 'webrtc' component requires the ESP-IDF framework "
+            "(esp32: framework: type: esp-idf)."
+        )
     sig = config[CONF_SIGNALING]
     if sig == "apprtc":
         if CONF_ROOM_ID not in config:
@@ -158,7 +166,6 @@ CONFIG_SCHEMA = cv.All(
             ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
-    cv.only_with_esp_idf,
     only_on_variant(supported=[VARIANT_ESP32P4]),
     _validate,
 )
