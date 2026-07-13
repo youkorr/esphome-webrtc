@@ -105,9 +105,10 @@ bool WebRTCComponent::open_() {
     case SIGNALING_WHIP:
       cfg.signaling_impl = esp_signaling_get_whip_impl();
       break;
-    case SIGNALING_JANUS:
-      cfg.signaling_impl = esp_signaling_get_janus_impl();
-      break;
+    // NOTE: janus is intentionally not handled -- esp-webrtc-solution v1.0.0
+    // has no janus_signal impl, so esp_signaling_get_janus_impl() must not be
+    // referenced (it would fail to link). SIGNALING_JANUS is not selectable
+    // from YAML. Re-add the case + the janus_signal component to restore it.
     case SIGNALING_APPRTC:
     default:
       cfg.signaling_impl = esp_signaling_get_apprtc_impl();

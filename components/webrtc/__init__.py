@@ -65,10 +65,11 @@ SendDataAction = webrtc_ns.class_("SendDataAction", automation.Action)
 
 # Enums shared with C++ (see webrtc.h)
 Signaling = webrtc_ns.enum("Signaling")
+# janus is not available at esp-webrtc-solution v1.0.0 (no impl/janus_signal),
+# so it is not offered here. apprtc + whip only.
 SIGNALING = {
     "apprtc": Signaling.SIGNALING_APPRTC,
     "whip": Signaling.SIGNALING_WHIP,
-    "janus": Signaling.SIGNALING_JANUS,
 }
 
 VideoCodec = webrtc_ns.enum("VideoCodec")
@@ -210,51 +211,48 @@ async def to_code(config):
         await automation.build_automation(trigger, [], conf)
 
     # --- esp-webrtc-solution components (git, NOT registry) ---
-    # esp_webrtc, codec_board and the signaling impls are not published to the
-    # ESP Component Registry: they live only in the esp-webrtc-solution repo,
-    # and the upstream demos pull them in via EXTRA_COMPONENT_DIRS (local
-    # paths). ESPHome can't do that, so we fetch them by git subpath.
-    #
-    # Their transitive deps -- esp_peer, tempotian/av_render,
+    # esp_webrtc, codec_board and the impls are not published to the ESP
+    # Component Registry: they live only in the esp-webrtc-solution repo, and
+    # the upstream demos pull them in via EXTRA_COMPONENT_DIRS (local paths).
+    # ESPHome can't do that, so we fetch them by git subpath. The core
+    # dependencies they need (esp_peer, tempotian/av_render,
     # tempotian/media_lib_utils, esp_capture, esp_codec_dev, nghttp,
-    # esp_websocket_client -- ARE in the registry and are resolved
-    # automatically from esp_webrtc's own idf_component.yml (its override_path
-    # entries are ignored for a non-root component, so the registry versions
-    # are used).
+    # esp_websocket_client) ARE in the registry and resolve automatically.
     #
-    # Pinned to v1.0.0: the C++ here targets the esp_webrtc ~0.9.1 API, and
-    # v1.0.0 is the closest stable tag. If upstream drifted, bump webrtc_ref
-    # (v1.2.0) and adjust webrtc.cpp / media_sys.c accordingly.
+    # Pinned to v1.0.0 (the C++ targets the ~0.9.1 API; v1.0.0 is the closest
+    # stable tag). The component layout below matches the v1.0.0 videocall_demo
+    # -- it differs from newer refs (e.g. janus_signal only exists later).
     webrtc_repo = "https://github.com/espressif/esp-webrtc-solution.git"
     webrtc_ref = "v1.0.0"
-    add_idf_component(
-        name="esp_webrtc", repo=webrtc_repo, ref=webrtc_ref, path="components/esp_webrtc"
-    )
-    add_idf_component(
-        name="codec_board", repo=webrtc_repo, ref=webrtc_ref, path="components/codec_board"
-    )
-    # Signaling backends referenced by webrtc.cpp (apprtc/whip/janus).
-    add_idf_component(
-        name="apprtc_signal",
-        repo=webrtc_repo,
-        ref=webrtc_ref,
-        path="components/esp_webrtc/impl/apprtc_signal",
-    )
-    add_idf_component(
-        name="whip_signal",
-        repo=webrtc_repo,
-        ref=webrtc_ref,
-        path="components/esp_webrtc/impl/whip_signal",
-    )
-    add_idf_component(
-        name="janus_signal",
-        repo=webrtc_repo,
-        ref=webrtc_ref,
-        path="components/esp_webrtc/impl/janus_signal",
-    )
 
-    # Registry components we use directly on the P4 (camera + hardware H.264).
-    add_idf_component(name="espressif/esp_h264", ref="~1.3")
+    def webrtc_git(name, path):
+        add_idf_component(name=name, repo=webrtc_repo, ref=webrtc_ref, path=path)
+
+    # Core components (not in the registry).
+    webrtc_git("esp_webrtc", "components/esp_webrtc")
+    webrtc_git("codec_board", "components/codec_board")
+
+    # esp_webrtc impls (v1.0.0 layout). peer_default provides
+    # esp_peer_get_default_impl(); apprtc/whip provide the signaling backends
+    # (janus does not exist at this tag).
+    webrtc_git("peer_default", "components/esp_webrtc/impl/peer_default")
+    webrtc_git("apprtc_signal", "components/esp_webrtc/impl/apprtc_signal")
+    webrtc_git("whip_signal", "components/esp_webrtc/impl/whip_signal")
+
+    # esp_capture source + encoder impls used by media_sys.c (camera V4L2 src,
+    # mic src, audio/video encoders). The esp_capture core itself comes from
+    # the registry via esp_webrtc's manifest.
+    webrtc_git("capture_audio_src", "components/esp_capture/src/impl/capture_audio_src")
+    webrtc_git("capture_video_src", "components/esp_capture/src/impl/capture_video_src")
+    webrtc_git("capture_audio_enc", "components/esp_capture/src/impl/capture_audio_enc")
+    webrtc_git("capture_video_enc", "components/esp_capture/src/impl/capture_video_enc")
+
+    # av_render renderer impls (I2S speaker + LCD) used by media_sys.c. The
+    # av_render core comes from the registry (tempotian/av_render).
+    webrtc_git("render_impl", "components/av_render/render_impl")
+
+    # Registry: hardware H.264 (version matching the v1.0.0 demo) + P4 camera.
+    add_idf_component(name="espressif/esp_h264", ref="1.0.4")
     add_idf_component(name="espressif/esp_video", ref="~1.0")
 
     # --- sdkconfig required by ESP-WebRTC on the ESP32-P4 ---
