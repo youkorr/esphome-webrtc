@@ -32,6 +32,9 @@ CONF_VIDEO_DIRECTION = "video_direction"
 CONF_AUDIO_DIRECTION = "audio_direction"
 CONF_VIDEO_BITRATE = "video_bitrate"
 CONF_AUDIO_BITRATE = "audio_bitrate"
+CONF_VIDEO_WIDTH = "video_width"
+CONF_VIDEO_HEIGHT = "video_height"
+CONF_FPS = "fps"
 CONF_ENABLE_DATA_CHANNEL = "enable_data_channel"
 CONF_AUTO_START = "auto_start"
 CONF_ICE_SERVERS = "ice_servers"
@@ -135,6 +138,9 @@ CONFIG_SCHEMA = cv.All(
             ),
             cv.Optional(CONF_VIDEO_BITRATE, default=0): cv.uint32_t,
             cv.Optional(CONF_AUDIO_BITRATE, default=0): cv.uint32_t,
+            cv.Optional(CONF_VIDEO_WIDTH, default=1024): cv.uint16_t,
+            cv.Optional(CONF_VIDEO_HEIGHT, default=600): cv.uint16_t,
+            cv.Optional(CONF_FPS, default=10): cv.int_range(min=1, max=60),
             cv.Optional(CONF_ENABLE_DATA_CHANNEL, default=True): cv.boolean,
             cv.Optional(CONF_AUTO_START, default=False): cv.boolean,
             cv.Optional(CONF_ICE_SERVERS): cv.ensure_list(ICE_SERVER_SCHEMA),
@@ -174,6 +180,9 @@ async def to_code(config):
     cg.add(var.set_audio_direction(config[CONF_AUDIO_DIRECTION]))
     cg.add(var.set_video_bitrate(config[CONF_VIDEO_BITRATE]))
     cg.add(var.set_audio_bitrate(config[CONF_AUDIO_BITRATE]))
+    cg.add(var.set_video_width(config[CONF_VIDEO_WIDTH]))
+    cg.add(var.set_video_height(config[CONF_VIDEO_HEIGHT]))
+    cg.add(var.set_video_fps(config[CONF_FPS]))
     cg.add(var.set_enable_data_channel(config[CONF_ENABLE_DATA_CHANNEL]))
     cg.add(var.set_auto_start(config[CONF_AUTO_START]))
 
@@ -219,6 +228,13 @@ async def to_code(config):
     add_idf_sdkconfig_option("CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP", True)
     # New I2C master driver (codec_board expects it).
     add_idf_sdkconfig_option("CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE", False)
+    # I2S channel ISR must live in internal RAM. On firmwares that enable
+    # CONFIG_GDMA_ISR_IRAM_SAFE (the P4 video/LCD stack does), GDMA refuses an
+    # I2S channel whose context is in PSRAM ("user context not in internal
+    # RAM"), which aborts audio init regardless of free RAM. This pairing is
+    # the decisive fix for the boot-time audio crash -- keep both set wherever
+    # this component does I2S via codec_board.
+    add_idf_sdkconfig_option("CONFIG_I2S_ISR_IRAM_SAFE", True)
     # Experimental features used by the esp_video/ISP pipeline on the P4.
     add_idf_sdkconfig_option("CONFIG_IDF_EXPERIMENTAL_FEATURES", True)
     add_idf_sdkconfig_option(
