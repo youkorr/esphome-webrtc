@@ -211,17 +211,17 @@ async def to_code(config):
         await automation.build_automation(trigger, [], conf)
 
     # --- esp-webrtc-solution components (git, NOT registry) ---
-    # esp_webrtc, codec_board and the impls are not published to the ESP
-    # Component Registry: they live only in the esp-webrtc-solution repo, and
-    # the upstream demos pull them in via EXTRA_COMPONENT_DIRS (local paths).
-    # ESPHome can't do that, so we fetch them by git subpath. The core
-    # dependencies they need (esp_peer, tempotian/av_render,
-    # tempotian/media_lib_utils, esp_capture, esp_codec_dev, nghttp,
-    # esp_websocket_client) ARE in the registry and resolve automatically.
+    # esp_webrtc, codec_board and the impls under components/esp_webrtc are not
+    # published to the ESP Component Registry: they live only in the
+    # esp-webrtc-solution repo, and the upstream demos pull them in via
+    # EXTRA_COMPONENT_DIRS (local paths). ESPHome can't do that, so we fetch
+    # them by git subpath. Their registry-published dependencies (esp_peer,
+    # tempotian/media_lib_utils, esp_codec_dev, nghttp, esp_websocket_client)
+    # resolve automatically.
     #
     # Pinned to v1.0.0 (the C++ targets the ~0.9.1 API; v1.0.0 is the closest
-    # stable tag). The component layout below matches the v1.0.0 videocall_demo
-    # -- it differs from newer refs (e.g. janus_signal only exists later).
+    # stable tag). The layout below matches the v1.0.0 videocall_demo -- it
+    # differs from newer refs (e.g. janus_signal only exists later).
     webrtc_repo = "https://github.com/espressif/esp-webrtc-solution.git"
     webrtc_ref = "v1.0.0"
 
@@ -234,22 +234,20 @@ async def to_code(config):
 
     # esp_webrtc impls (v1.0.0 layout). peer_default provides
     # esp_peer_get_default_impl(); apprtc/whip provide the signaling backends
-    # (janus does not exist at this tag).
+    # (janus does not exist at this tag). These live UNDER components/esp_webrtc
+    # which we pull anyway, so no extra sibling dirs are dragged in.
     webrtc_git("peer_default", "components/esp_webrtc/impl/peer_default")
     webrtc_git("apprtc_signal", "components/esp_webrtc/impl/apprtc_signal")
     webrtc_git("whip_signal", "components/esp_webrtc/impl/whip_signal")
 
-    # esp_capture source + encoder impls used by media_sys.c (camera V4L2 src,
-    # mic src, audio/video encoders). The esp_capture core itself comes from
-    # the registry via esp_webrtc's manifest.
-    webrtc_git("capture_audio_src", "components/esp_capture/src/impl/capture_audio_src")
-    webrtc_git("capture_video_src", "components/esp_capture/src/impl/capture_video_src")
-    webrtc_git("capture_audio_enc", "components/esp_capture/src/impl/capture_audio_enc")
-    webrtc_git("capture_video_enc", "components/esp_capture/src/impl/capture_video_enc")
-
-    # av_render renderer impls (I2S speaker + LCD) used by media_sys.c. The
-    # av_render core comes from the registry (tempotian/av_render).
-    webrtc_git("render_impl", "components/av_render/render_impl")
+    # esp_capture and av_render (and their sub-impls) come from the ESP
+    # REGISTRY, not git. Pulling their sub-impls by git subpath would drag the
+    # parent components/esp_capture and components/av_render dirs into the
+    # checkout, where the component manager treats them as *local* components
+    # and chokes on their relative override_path fields ("path ... does not
+    # point to a directory"). The registry-published manifests are clean.
+    add_idf_component(name="espressif/esp_capture", ref="~1.0")
+    add_idf_component(name="tempotian/av_render", ref="~0.9")
 
     # Registry: hardware H.264 (version matching the v1.0.0 demo) + P4 camera.
     add_idf_component(name="espressif/esp_h264", ref="1.0.4")
