@@ -11,7 +11,6 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
 from esphome.const import CONF_ID, CONF_TRIGGER_ID, CONF_URL
-from esphome.core import CORE
 
 from esphome.components.esp32 import (
     add_idf_component,
@@ -105,13 +104,8 @@ ICE_SERVER_SCHEMA = cv.Schema(
 
 
 def _validate(config):
-    # ESP-IDF only (esp_webrtc + the camera/codec pipeline are IDF-only).
-    # cv.only_with_esp_idf does not exist in ESPHome; check the framework here.
-    if not CORE.using_esp_idf:
-        raise cv.Invalid(
-            "The 'webrtc' component requires the ESP-IDF framework "
-            "(esp32: framework: type: esp-idf)."
-        )
+    # ESP-IDF only: enforced by only_on_variant(ESP32P4) below -- the P4 has no
+    # Arduino support, so requiring the P4 variant already implies ESP-IDF.
     sig = config[CONF_SIGNALING]
     if sig == "apprtc":
         if CONF_ROOM_ID not in config:
@@ -261,14 +255,18 @@ async def to_code(config):
 WEBRTC_ACTION_SCHEMA = cv.Schema({cv.GenerateID(): cv.use_id(WebRTCComponent)})
 
 
-@automation.register_action("webrtc.start", StartAction, WEBRTC_ACTION_SCHEMA)
+@automation.register_action(
+    "webrtc.start", StartAction, WEBRTC_ACTION_SCHEMA, synchronous=True
+)
 async def webrtc_start_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
     await cg.register_parented(var, config[CONF_ID])
     return var
 
 
-@automation.register_action("webrtc.stop", StopAction, WEBRTC_ACTION_SCHEMA)
+@automation.register_action(
+    "webrtc.stop", StopAction, WEBRTC_ACTION_SCHEMA, synchronous=True
+)
 async def webrtc_stop_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
     await cg.register_parented(var, config[CONF_ID])
@@ -285,7 +283,7 @@ SEND_DATA_ACTION_SCHEMA = cv.Schema(
 
 
 @automation.register_action(
-    "webrtc.send_data", SendDataAction, SEND_DATA_ACTION_SCHEMA
+    "webrtc.send_data", SendDataAction, SEND_DATA_ACTION_SCHEMA, synchronous=True
 )
 async def webrtc_send_data_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
