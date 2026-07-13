@@ -209,14 +209,53 @@ async def to_code(config):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         await automation.build_automation(trigger, [], conf)
 
-    # --- Managed (ESP Component Registry) dependencies ---
-    # esp_webrtc pulls its own transitive deps (esp_peer, esp_capture,
-    # av_render, media_lib_utils, esp_codec_dev, nghttp, esp_websocket_client).
-    # We add the P4 camera + H.264 codec + board pinmap helpers explicitly.
-    add_idf_component(name="espressif/esp_webrtc", ref="0.9.1")
-    add_idf_component(name="espressif/esp_h264", ref="1.3.0")
-    add_idf_component(name="espressif/esp_video", ref="1.0.0")
-    add_idf_component(name="espressif/codec_board", ref="0.1.0")
+    # --- esp-webrtc-solution components (git, NOT registry) ---
+    # esp_webrtc, codec_board and the signaling impls are not published to the
+    # ESP Component Registry: they live only in the esp-webrtc-solution repo,
+    # and the upstream demos pull them in via EXTRA_COMPONENT_DIRS (local
+    # paths). ESPHome can't do that, so we fetch them by git subpath.
+    #
+    # Their transitive deps -- esp_peer, tempotian/av_render,
+    # tempotian/media_lib_utils, esp_capture, esp_codec_dev, nghttp,
+    # esp_websocket_client -- ARE in the registry and are resolved
+    # automatically from esp_webrtc's own idf_component.yml (its override_path
+    # entries are ignored for a non-root component, so the registry versions
+    # are used).
+    #
+    # Pinned to v1.0.0: the C++ here targets the esp_webrtc ~0.9.1 API, and
+    # v1.0.0 is the closest stable tag. If upstream drifted, bump webrtc_ref
+    # (v1.2.0) and adjust webrtc.cpp / media_sys.c accordingly.
+    webrtc_repo = "https://github.com/espressif/esp-webrtc-solution.git"
+    webrtc_ref = "v1.0.0"
+    add_idf_component(
+        name="esp_webrtc", repo=webrtc_repo, ref=webrtc_ref, path="components/esp_webrtc"
+    )
+    add_idf_component(
+        name="codec_board", repo=webrtc_repo, ref=webrtc_ref, path="components/codec_board"
+    )
+    # Signaling backends referenced by webrtc.cpp (apprtc/whip/janus).
+    add_idf_component(
+        name="apprtc_signal",
+        repo=webrtc_repo,
+        ref=webrtc_ref,
+        path="components/esp_webrtc/impl/apprtc_signal",
+    )
+    add_idf_component(
+        name="whip_signal",
+        repo=webrtc_repo,
+        ref=webrtc_ref,
+        path="components/esp_webrtc/impl/whip_signal",
+    )
+    add_idf_component(
+        name="janus_signal",
+        repo=webrtc_repo,
+        ref=webrtc_ref,
+        path="components/esp_webrtc/impl/janus_signal",
+    )
+
+    # Registry components we use directly on the P4 (camera + hardware H.264).
+    add_idf_component(name="espressif/esp_h264", ref="~1.3")
+    add_idf_component(name="espressif/esp_video", ref="~1.0")
 
     # --- sdkconfig required by ESP-WebRTC on the ESP32-P4 ---
     # DTLS-SRTP is mandatory for WebRTC media encryption.
