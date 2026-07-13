@@ -211,45 +211,49 @@ async def to_code(config):
         await automation.build_automation(trigger, [], conf)
 
     # --- esp-webrtc-solution components (git, NOT registry) ---
-    # esp_webrtc, codec_board and the impls under components/esp_webrtc are not
-    # published to the ESP Component Registry: they live only in the
-    # esp-webrtc-solution repo, and the upstream demos pull them in via
-    # EXTRA_COMPONENT_DIRS (local paths). ESPHome can't do that, so we fetch
-    # them by git subpath. Their registry-published dependencies (esp_peer,
-    # tempotian/media_lib_utils, esp_codec_dev, nghttp, esp_websocket_client)
-    # resolve automatically.
+    # None of esp_webrtc / esp_capture / av_render / codec_board are published
+    # to the ESP Component Registry as usable packages; they live in the
+    # esp-webrtc-solution monorepo and the upstream demos consume them via
+    # EXTRA_COMPONENT_DIRS. ESPHome can't do that, so we fetch them by git.
     #
     # Pinned to v1.0.0 (the C++ targets the ~0.9.1 API; v1.0.0 is the closest
-    # stable tag). The layout below matches the v1.0.0 videocall_demo -- it
-    # differs from newer refs (e.g. janus_signal only exists later).
+    # stable tag). Layout matches the v1.0.0 videocall_demo -- newer refs
+    # differ (e.g. janus_signal only exists later).
     webrtc_repo = "https://github.com/espressif/esp-webrtc-solution.git"
     webrtc_ref = "v1.0.0"
 
     def webrtc_git(name, path):
         add_idf_component(name=name, repo=webrtc_repo, ref=webrtc_ref, path=path)
 
-    # Core components (not in the registry).
+    # Core component dirs, pulled WHOLE from the v1.0.0 snapshot. Whole (not
+    # sub-path) so each core's manifest can resolve its internal `path:` deps,
+    # and all from the SAME snapshot so their inter-component version
+    # constraints agree (mixing git v1.0.0 codec_board with a registry
+    # av_render 0.9.x pulled incompatible esp_codec_dev ranges: ~1.3.4 vs ~1.4).
+    # Being declared deps, their relative override_path fields are ignored, so
+    # the registry supplies the leaf deps (esp_peer, media_lib_utils,
+    # esp_codec_dev, nghttp, esp_websocket_client) at v1.0.0-compatible versions.
     webrtc_git("esp_webrtc", "components/esp_webrtc")
+    webrtc_git("esp_capture", "components/esp_capture")
+    webrtc_git("av_render", "components/av_render")
     webrtc_git("codec_board", "components/codec_board")
 
-    # esp_webrtc impls (v1.0.0 layout). peer_default provides
-    # esp_peer_get_default_impl(); apprtc/whip provide the signaling backends
-    # (janus does not exist at this tag). These live UNDER components/esp_webrtc
-    # which we pull anyway, so no extra sibling dirs are dragged in.
+    # Selected impl plugins (the cores don't force these; the demo picks them).
+    # peer_default -> esp_peer_get_default_impl(); apprtc/whip -> signaling
+    # (janus does not exist at v1.0.0).
     webrtc_git("peer_default", "components/esp_webrtc/impl/peer_default")
     webrtc_git("apprtc_signal", "components/esp_webrtc/impl/apprtc_signal")
     webrtc_git("whip_signal", "components/esp_webrtc/impl/whip_signal")
+    # esp_capture src + encoder impls used by media_sys.c.
+    webrtc_git("capture_audio_src", "components/esp_capture/src/impl/capture_audio_src")
+    webrtc_git("capture_video_src", "components/esp_capture/src/impl/capture_video_src")
+    webrtc_git("capture_audio_enc", "components/esp_capture/src/impl/capture_audio_enc")
+    webrtc_git("capture_video_enc", "components/esp_capture/src/impl/capture_video_enc")
+    # av_render I2S + LCD renderers used by media_sys.c.
+    webrtc_git("render_impl", "components/av_render/render_impl")
 
-    # esp_capture and av_render (and their sub-impls) come from the ESP
-    # REGISTRY, not git. Pulling their sub-impls by git subpath would drag the
-    # parent components/esp_capture and components/av_render dirs into the
-    # checkout, where the component manager treats them as *local* components
-    # and chokes on their relative override_path fields ("path ... does not
-    # point to a directory"). The registry-published manifests are clean.
-    add_idf_component(name="espressif/esp_capture", ref="~1.0")
-    add_idf_component(name="tempotian/av_render", ref="~0.9")
-
-    # Registry: hardware H.264 (version matching the v1.0.0 demo) + P4 camera.
+    # Registry leaves: hardware H.264 (version matching the v1.0.0 demo) + the
+    # P4 camera stack.
     add_idf_component(name="espressif/esp_h264", ref="1.0.4")
     add_idf_component(name="espressif/esp_video", ref="~1.0")
 
