@@ -188,6 +188,11 @@ async def to_code(config):
     # PSRAM for the media/jitter buffers.
     add_idf_sdkconfig_option("CONFIG_SPIRAM", True)
     add_idf_sdkconfig_option("CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP", True)
+    # esp_peer's ICE transport (udp/tcp/tls.c) references struct sockaddr_in6
+    # unconditionally; that type only exists with lwIP IPv6 enabled. Plain
+    # ESP-IDF defaults IPv6 on (so the upstream demo omits it) but ESPHome
+    # defaults it off -> "storage size of 'sin6' isn't known".
+    add_idf_sdkconfig_option("CONFIG_LWIP_IPV6", True)
     # ICE candidate gathering opens many concurrent UDP sockets.
     add_idf_sdkconfig_option("CONFIG_LWIP_MAX_UDP_PCBS", 1024)
     add_idf_sdkconfig_option("CONFIG_LWIP_UDP_RECVMBOX_SIZE", 64)
