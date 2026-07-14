@@ -103,6 +103,8 @@ class WebRTCComponent : public Component {
   bool enable_data_channel_{true};
   bool auto_start_{false};
   bool auto_start_attempted_{false};
+  // true when this side answers (peer already in room); false when it offers.
+  bool controlled_{false};
   std::vector<IceServer> ice_servers_;
 
   ApprtcSignaling signaling_;

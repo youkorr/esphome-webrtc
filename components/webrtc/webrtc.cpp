@@ -138,7 +138,9 @@ bool WebRTCComponent::open_peer_() {
   esp_peer_cfg_t cfg = {};
   cfg.server_lists = static_cast<esp_peer_ice_server_cfg_t *>(this->ice_cfgs_);
   cfg.server_num = static_cast<uint8_t>(this->ice_servers_.size());
-  cfg.role = ESP_PEER_ROLE_CONTROLLING;
+  // Role must match the AppRTC initiator flag: the offerer is CONTROLLING, the
+  // answerer is CONTROLLED.
+  cfg.role = this->controlled_ ? ESP_PEER_ROLE_CONTROLLED : ESP_PEER_ROLE_CONTROLLING;
   cfg.ice_trans_policy = ESP_PEER_ICE_TRANS_POLICY_ALL;
   cfg.audio_dir = static_cast<esp_peer_media_dir_t>(this->audio_dir_);
   cfg.video_dir = static_cast<esp_peer_media_dir_t>(this->video_dir_);
@@ -184,37 +186,46 @@ void WebRTCComponent::task_fn_(void *arg) {
 }
 
 void WebRTCComponent::start() {
-  if (!this->open_peer_()) {
+  if (this->started_) {
     return;
   }
-  if (this->started_) {
+  // 1) Join the room first, so we know whether we offer or answer.
+  std::string url = "https://webrtc.espressif.com/join/" + this->room_id_;
+  ESP_LOGI(TAG, "Joining signaling room: %s", url.c_str());
+  if (!this->signaling_.join(url)) {
+    ESP_LOGE(TAG, "signaling join failed");
+    return;
+  }
+  this->controlled_ = !this->signaling_.is_initiator();
+  ESP_LOGI(TAG, "role: %s", this->controlled_ ? "answerer (controlled)" : "offerer (controlling)");
+
+  // 2) Open the peer with the correct role.
+  if (!this->open_peer_()) {
     return;
   }
   const esp_peer_ops_t *ops = static_cast<const esp_peer_ops_t *>(this->ops_);
   auto handle = static_cast<esp_peer_handle_t>(this->peer_);
 
-  // Wire signaling -> peer (runs on the websocket task).
+  // 3) Wire signaling -> peer BEFORE connect() replays any queued offer.
   this->signaling_.on_remote_sdp = [this](const std::string &sdp) { this->feed_remote_sdp_(sdp); };
   this->signaling_.on_remote_candidate = [this](const std::string &c) {
     this->feed_remote_candidate_(c);
   };
   this->signaling_.on_bye = [this]() { ESP_LOGI(TAG, "peer sent bye"); };
 
-  // esp_peer main_loop task.
+  // 4) esp_peer main_loop task.
   this->run_ = true;
   xTaskCreatePinnedToCore(task_fn_, "webrtc_peer", 8192, this, 5,
                           reinterpret_cast<TaskHandle_t *>(&this->task_), 0);
 
-  // Join the signaling room (blocking HTTP).
-  std::string url = "https://webrtc.espressif.com/join/" + this->room_id_;
-  ESP_LOGI(TAG, "Joining signaling room: %s", url.c_str());
-  if (!this->signaling_.start(url)) {
-    ESP_LOGE(TAG, "signaling join failed");
-  }
+  // 5) Open the WebSocket and replay the queued offer (answerer: this feeds the
+  // peer's offer, so esp_peer produces the answer via on_msg).
+  this->signaling_.connect();
 
-  // Create the peer connection: this generates the local offer, which arrives
-  // via peer_on_msg and is posted through signaling.
-  ops->new_connection(handle);
+  // 6) Only the offerer creates the connection (generates the local offer).
+  if (!this->controlled_) {
+    ops->new_connection(handle);
+  }
   this->started_ = true;
 }
 

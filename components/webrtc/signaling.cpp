@@ -76,8 +76,7 @@ static void ws_event_(void *arg, esp_event_base_t base, int32_t event_id, void *
   }
 }
 
-bool ApprtcSignaling::start(const std::string &signal_url) {
-  // 1) POST to join the room.
+bool ApprtcSignaling::join(const std::string &signal_url) {
   std::string resp = http_post_(signal_url, "");
   if (resp.empty()) {
     ESP_LOGE(TAG, "empty join response from %s", signal_url.c_str());
@@ -89,8 +88,8 @@ bool ApprtcSignaling::start(const std::string &signal_url) {
     return false;
   }
   cJSON *params = cJSON_GetObjectItem(root, "params");
-  cJSON *messages = nullptr;
   bool ok = false;
+  this->pending_msgs_.clear();
   do {
     if (params == nullptr) {
       break;
@@ -115,39 +114,40 @@ bool ApprtcSignaling::start(const std::string &signal_url) {
         this->is_initiator_ = cJSON_IsTrue(it);
       }
     }
-    // base_url = signal_url without the trailing "/join...".
     this->base_url_ = signal_url;
     size_t p = this->base_url_.find("/join");
     if (p != std::string::npos) {
       this->base_url_ = this->base_url_.substr(0, p);
     }
     this->message_url_ = this->base_url_ + "/message/" + this->room_id_ + "/" + this->client_id_;
-    messages = cJSON_GetObjectItem(params, "messages");
+    cJSON *messages = cJSON_GetObjectItem(params, "messages");
+    if (messages != nullptr && cJSON_IsArray(messages)) {
+      int n = cJSON_GetArraySize(messages);
+      for (int i = 0; i < n; i++) {
+        cJSON *m = cJSON_GetArrayItem(messages, i);
+        if (m != nullptr && m->valuestring != nullptr) {
+          this->pending_msgs_.emplace_back(m->valuestring);
+        }
+      }
+    }
     if (this->client_id_.empty() || this->wss_url_.empty()) {
       break;
     }
     ok = true;
   } while (false);
-
-  // Replay any messages already queued in the room (e.g. the peer's offer if it
-  // joined first).
-  if (ok && messages != nullptr && cJSON_IsArray(messages)) {
-    int n = cJSON_GetArraySize(messages);
-    for (int i = 0; i < n; i++) {
-      cJSON *m = cJSON_GetArrayItem(messages, i);
-      if (m != nullptr && m->valuestring != nullptr) {
-        this->handle_ws_text_(m->valuestring, static_cast<int>(strlen(m->valuestring)));
-      }
-    }
-  }
   cJSON_Delete(root);
   if (!ok) {
     ESP_LOGE(TAG, "join: missing client_id/wss_url");
-    return false;
+  } else {
+    ESP_LOGI(TAG, "signaling joined: room=%s client=%s initiator=%s", this->room_id_.c_str(),
+             this->client_id_.c_str(), this->is_initiator_ ? "yes" : "no");
   }
+  return ok;
+}
 
-  // 2) Connect the WebSocket. The AppRTC server checks the Origin header and
-  // returns 403 without it; store it in a member so it outlives start().
+bool ApprtcSignaling::connect() {
+  // The AppRTC server checks the Origin header (403 without it); store it in a
+  // member so it outlives esp_websocket_client_start.
   this->origin_ = "Origin: " + this->base_url_ + "\r\n";
   esp_websocket_client_config_t wcfg = {};
   wcfg.uri = this->wss_url_.c_str();
@@ -167,8 +167,12 @@ bool ApprtcSignaling::start(const std::string &signal_url) {
     ESP_LOGE(TAG, "websocket start failed");
     return false;
   }
-  ESP_LOGI(TAG, "signaling joined: room=%s client=%s initiator=%s", this->room_id_.c_str(),
-           this->client_id_.c_str(), this->is_initiator_ ? "yes" : "no");
+  // Replay any messages already queued in the room (e.g. the peer's offer when
+  // it joined first). Done now that the caller has opened the peer.
+  for (auto &m : this->pending_msgs_) {
+    this->handle_ws_text_(m.c_str(), static_cast<int>(m.size()));
+  }
+  this->pending_msgs_.clear();
   return true;
 }
 
@@ -239,7 +243,8 @@ void ApprtcSignaling::send_sdp(const std::string &sdp) {
   char *payload = cJSON_PrintUnformatted(j);
   cJSON_Delete(j);
   if (payload != nullptr) {
-    ESP_LOGD(TAG, "send local sdp (%u bytes)", (unsigned) sdp.size());
+    ESP_LOGD(TAG, "send local %s (%u bytes)", this->is_initiator_ ? "offer" : "answer",
+             (unsigned) sdp.size());
     http_post_(this->message_url_, payload);
     free(payload);
   }
