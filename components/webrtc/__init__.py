@@ -1,10 +1,17 @@
-"""ESPHome external component: Espressif ESP-WebRTC port for the ESP32-P4.
+"""ESPHome external component: WebRTC peer-to-peer calling on the ESP32-P4,
+built directly on Espressif's clean, registry-published `esp_peer`
+(PeerConnection: ICE/STUN/TURN, DTLS-SRTP, SCTP data channel).
 
-Wraps Espressif's `esp_webrtc` / `esp_peer` stack so an ESP32-P4 can do
-real-time peer-to-peer audio/video calling from an ESPHome configuration.
+Unlike the esp_webrtc wrapper, esp_peer only handles TRANSPORT: the app feeds
+it encoded frames and receives the peer's encoded frames via callbacks. That
+lets us plug it into youkorr's own media components (esp_video + esp_h264 for
+capture/encode, the ip-camera-viewer edge264 decoder -> LVGL canvas, fdaudio),
+instead of Espressif's GMF stack -- so it can live in the SAME firmware as LVGL.
 
-NOTE: Only the ESP32-P4 is supported (hardware H.264/MJPEG + the camera/codec
-pipeline the upstream demos rely on), and only the ESP-IDF framework.
+Phase 1 (this file): drive esp_peer (open + main_loop + state events).
+Signaling (AppRTC client) and media plumbing are added in later phases.
+
+ESP32-P4 + ESP-IDF only.
 """
 
 import esphome.codegen as cg
@@ -22,16 +29,11 @@ from esphome.components.esp32.const import VARIANT_ESP32P4
 CODEOWNERS = ["@youkorr"]
 DEPENDENCIES = ["esp32", "network"]
 
-CONF_SIGNALING = "signaling"
 CONF_ROOM_ID = "room_id"
-CONF_SIGNAL_URL = "signal_url"
-CONF_BOARD = "board"
 CONF_VIDEO_CODEC = "video_codec"
 CONF_AUDIO_CODEC = "audio_codec"
 CONF_VIDEO_DIRECTION = "video_direction"
 CONF_AUDIO_DIRECTION = "audio_direction"
-CONF_VIDEO_BITRATE = "video_bitrate"
-CONF_AUDIO_BITRATE = "audio_bitrate"
 CONF_VIDEO_WIDTH = "video_width"
 CONF_VIDEO_HEIGHT = "video_height"
 CONF_FPS = "fps"
@@ -48,7 +50,6 @@ CONF_ON_CONNECT_FAILED = "on_connect_failed"
 webrtc_ns = cg.esphome_ns.namespace("webrtc")
 WebRTCComponent = webrtc_ns.class_("WebRTCComponent", cg.Component)
 
-# Triggers
 ConnectedTrigger = webrtc_ns.class_("ConnectedTrigger", automation.Trigger.template())
 DisconnectedTrigger = webrtc_ns.class_(
     "DisconnectedTrigger", automation.Trigger.template()
@@ -58,20 +59,9 @@ ConnectFailedTrigger = webrtc_ns.class_(
     "ConnectFailedTrigger", automation.Trigger.template()
 )
 
-# Actions
 StartAction = webrtc_ns.class_("StartAction", automation.Action)
 StopAction = webrtc_ns.class_("StopAction", automation.Action)
 SendDataAction = webrtc_ns.class_("SendDataAction", automation.Action)
-
-# Enums shared with C++ (see webrtc.h)
-Signaling = webrtc_ns.enum("Signaling")
-# Only the AppRTC signaling impl is pulled (components/esp_webrtc/impl/
-# apprtc_signal), matching the proven webrtc_call recipe. whip/janus impls are
-# not declared, so they are not offered here (referencing their
-# esp_signaling_get_*_impl() would fail to link).
-SIGNALING = {
-    "apprtc": Signaling.SIGNALING_APPRTC,
-}
 
 VideoCodec = webrtc_ns.enum("VideoCodec")
 VIDEO_CODEC = {
@@ -104,30 +94,11 @@ ICE_SERVER_SCHEMA = cv.Schema(
     }
 )
 
-
-def _validate(config):
-    # ESP-IDF only: enforced by only_on_variant(ESP32P4) below -- the P4 has no
-    # Arduino support, so requiring the P4 variant already implies ESP-IDF.
-    sig = config[CONF_SIGNALING]
-    if sig == "apprtc":
-        if CONF_ROOM_ID not in config:
-            raise cv.Invalid("'room_id' is required when signaling: apprtc")
-    else:
-        if CONF_SIGNAL_URL not in config:
-            raise cv.Invalid(f"'signal_url' is required when signaling: {sig}")
-    return config
-
-
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(WebRTCComponent),
-            cv.Optional(CONF_SIGNALING, default="apprtc"): cv.enum(
-                SIGNALING, lower=True
-            ),
-            cv.Optional(CONF_ROOM_ID): cv.string,
-            cv.Optional(CONF_SIGNAL_URL): cv.string,
-            cv.Optional(CONF_BOARD, default="ESP32_P4_DEV_V14"): cv.string,
+            cv.Optional(CONF_ROOM_ID, default="esphome_room"): cv.string,
             cv.Optional(CONF_VIDEO_CODEC, default="h264"): cv.enum(
                 VIDEO_CODEC, lower=True
             ),
@@ -140,11 +111,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_AUDIO_DIRECTION, default="sendrecv"): cv.enum(
                 MEDIA_DIR, lower=True
             ),
-            cv.Optional(CONF_VIDEO_BITRATE, default=0): cv.uint32_t,
-            cv.Optional(CONF_AUDIO_BITRATE, default=0): cv.uint32_t,
-            cv.Optional(CONF_VIDEO_WIDTH, default=1024): cv.uint16_t,
-            cv.Optional(CONF_VIDEO_HEIGHT, default=600): cv.uint16_t,
-            cv.Optional(CONF_FPS, default=10): cv.int_range(min=1, max=60),
+            cv.Optional(CONF_VIDEO_WIDTH, default=640): cv.uint16_t,
+            cv.Optional(CONF_VIDEO_HEIGHT, default=480): cv.uint16_t,
+            cv.Optional(CONF_FPS, default=15): cv.int_range(min=1, max=60),
             cv.Optional(CONF_ENABLE_DATA_CHANNEL, default=True): cv.boolean,
             cv.Optional(CONF_AUTO_START, default=False): cv.boolean,
             cv.Optional(CONF_ICE_SERVERS): cv.ensure_list(ICE_SERVER_SCHEMA),
@@ -163,7 +132,6 @@ CONFIG_SCHEMA = cv.All(
         }
     ).extend(cv.COMPONENT_SCHEMA),
     only_on_variant(supported=[VARIANT_ESP32P4]),
-    _validate,
 )
 
 
@@ -171,21 +139,16 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
-    cg.add(var.set_signaling(config[CONF_SIGNALING]))
-    if CONF_ROOM_ID in config:
-        cg.add(var.set_room_id(config[CONF_ROOM_ID]))
-    if CONF_SIGNAL_URL in config:
-        cg.add(var.set_signal_url(config[CONF_SIGNAL_URL]))
-    cg.add(var.set_board(config[CONF_BOARD]))
+    cg.add(var.set_room_id(config[CONF_ROOM_ID]))
     cg.add(var.set_video_codec(config[CONF_VIDEO_CODEC]))
     cg.add(var.set_audio_codec(config[CONF_AUDIO_CODEC]))
     cg.add(var.set_video_direction(config[CONF_VIDEO_DIRECTION]))
     cg.add(var.set_audio_direction(config[CONF_AUDIO_DIRECTION]))
-    cg.add(var.set_video_bitrate(config[CONF_VIDEO_BITRATE]))
-    cg.add(var.set_audio_bitrate(config[CONF_AUDIO_BITRATE]))
-    cg.add(var.set_video_width(config[CONF_VIDEO_WIDTH]))
-    cg.add(var.set_video_height(config[CONF_VIDEO_HEIGHT]))
-    cg.add(var.set_video_fps(config[CONF_FPS]))
+    cg.add(
+        var.set_video_resolution(
+            config[CONF_VIDEO_WIDTH], config[CONF_VIDEO_HEIGHT], config[CONF_FPS]
+        )
+    )
     cg.add(var.set_enable_data_channel(config[CONF_ENABLE_DATA_CHANNEL]))
     cg.add(var.set_auto_start(config[CONF_AUTO_START]))
 
@@ -211,55 +174,21 @@ async def to_code(config):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         await automation.build_automation(trigger, [], conf)
 
-    # --- esp-webrtc-solution components ---
-    # Proven recipe from youkorr's working webrtc_call component (compiled +
-    # LAN-validated). The key: track the `main` branch (NOT a release tag) and
-    # take esp_capture from the REGISTRY. On main, esp_capture ~0.8 ships its
-    # src/render impls bundled and esp_webrtc pulls av_render / media_lib_utils
-    # transitively -- so we only need FOUR git path-components. The v1.0.0 tag
-    # instead splits those impls into sibling components whose relative `path:`
-    # deps (e.g. `esp_capture: {path: ../../../../esp_capture}`) break when the
-    # IDF component manager fetches each in isolation. Do not pin a tag here.
-    WEBRTC_REPO = "https://github.com/espressif/esp-webrtc-solution"
-    WEBRTC_REF = "main"
+    # --- The ONE clean dependency: esp_peer from the ESP Component Registry ---
+    # Self-contained (depends only on esp_libsrtp) and ships its prebuilt
+    # libpeer_default.a for the P4. No override_path, no sibling git components,
+    # no version conflicts -- this is what finally builds cleanly.
+    add_idf_component(name="espressif/esp_peer", ref="~1.5")
 
-    # Registry: hardware H.264 + the capture stack (pulls esp_video, av_render,
-    # media_lib_utils, esp_codec_dev, ... transitively at compatible versions).
-    add_idf_component(name="espressif/esp_h264", ref="1.0.4")
-    add_idf_component(name="espressif/esp_capture", ref="~0.8")
-
-    # Git path-components (not in the registry): the WebRTC stack, the peer
-    # transport, codec_board, and the AppRTC signaling impl.
-    for _name, _path in (
-        ("codec_board", "components/codec_board"),
-        ("esp_peer", "components/esp_peer"),
-        ("esp_webrtc", "components/esp_webrtc"),
-        ("apprtc_signal", "components/esp_webrtc/impl/apprtc_signal"),
-    ):
-        add_idf_component(name=_name, repo=WEBRTC_REPO, ref=WEBRTC_REF, path=_path)
-
-    # --- sdkconfig required by ESP-WebRTC on the ESP32-P4 ---
     # DTLS-SRTP is mandatory for WebRTC media encryption.
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_SSL_PROTO_DTLS", True)
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_SSL_DTLS_SRTP", True)
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_X509_CREATE_C", True)
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC", True)
-    # PSRAM is required to hold the media buffers.
+    # PSRAM for the media/jitter buffers.
     add_idf_sdkconfig_option("CONFIG_SPIRAM", True)
     add_idf_sdkconfig_option("CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP", True)
-    # New I2C master driver (codec_board expects it).
-    add_idf_sdkconfig_option("CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE", False)
-    # I2S channel ISR must live in internal RAM. On firmwares that enable
-    # CONFIG_GDMA_ISR_IRAM_SAFE (the P4 video/LCD stack does), GDMA refuses an
-    # I2S channel whose context is in PSRAM ("user context not in internal
-    # RAM"), which aborts audio init regardless of free RAM. This pairing is
-    # the decisive fix for the boot-time audio crash -- keep both set wherever
-    # this component does I2S via codec_board.
-    add_idf_sdkconfig_option("CONFIG_I2S_ISR_IRAM_SAFE", True)
-    # Experimental features used by the esp_video pipeline on the P4.
-    add_idf_sdkconfig_option("CONFIG_IDF_EXPERIMENTAL_FEATURES", True)
-    # Bidirectional A/V + ICE candidate gathering opens many concurrent UDP
-    # sockets; the IDF defaults are too low (matches upstream videocall_demo).
+    # ICE candidate gathering opens many concurrent UDP sockets.
     add_idf_sdkconfig_option("CONFIG_LWIP_MAX_UDP_PCBS", 1024)
     add_idf_sdkconfig_option("CONFIG_LWIP_UDP_RECVMBOX_SIZE", 64)
     add_idf_sdkconfig_option("CONFIG_LWIP_TCPIP_RECVMBOX_SIZE", 64)
@@ -267,10 +196,6 @@ async def to_code(config):
     cg.add_define("USE_ESP_WEBRTC")
 
 
-# --- Actions -----------------------------------------------------------------
-
-# maybe_simple_id lets `webrtc.start: rtc` work as shorthand for
-# `webrtc.start: {id: rtc}` (the plain dict schema rejected the bare id).
 WEBRTC_ACTION_SCHEMA = automation.maybe_simple_id(
     {cv.GenerateID(): cv.use_id(WebRTCComponent)}
 )
