@@ -173,38 +173,32 @@ async def to_code(config):
 
     # --- esp_peer (registry) : the WebRTC transport ---
     add_idf_component(name="espressif/esp_peer", ref="~1.5")
-    # AppRTC signaling client uses a WebSocket + HTTP + cJSON.
     add_idf_component(name="espressif/esp_websocket_client", ref="~1.4")
-    # cJSON (json) and esp_http_client are built-in IDF components; ESPHome
-    # 2026.2+ drops unused built-ins, so pull them in explicitly.
     include_builtin_idf_component("json")
     include_builtin_idf_component("esp_http_client")
 
-    # DTLS-SRTP is mandatory for WebRTC media encryption.
+    # === mbedTLS for WebRTC DTLS-SRTP ===
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_SSL_PROTO_DTLS", True)
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_SSL_DTLS_SRTP", True)
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_X509_CREATE_C", True)
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC", True)
-    # WebRTC DTLS uses an ECDSA self-signed cert + ECDHE-ECDSA-AES-GCM
-    # ciphersuites. Plain ESP-IDF has these on by default (the upstream demo
-    # omits them) but ESPHome trims ciphersuites its own client TLS doesn't use,
-    # which yields -0x7080 (MBEDTLS_ERR_SSL_FEATURE_UNAVAILABLE) in the DTLS
-    # handshake. Force the pieces on.
+    # The ESP32 is the DTLS SERVER; ESPHome may trim mbedTLS to client-only.
+    add_idf_sdkconfig_option("CONFIG_MBEDTLS_TLS_SERVER_AND_CLIENT", True)
+    add_idf_sdkconfig_option("CONFIG_MBEDTLS_SSL_PROTO_TLS1_2", True)
+    # WebRTC DTLS uses ECDSA secp256r1 cert + ECDHE-ECDSA-AES-GCM. -0x7080
+    # (FEATURE_UNAVAILABLE) means these are trimmed. NEEDS A CLEAN BUILD.
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_ECDH_C", True)
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_ECDSA_C", True)
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_ECP_DP_SECP256R1_ENABLED", True)
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA", True)
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_GCM_C", True)
-    # Cert bundle for HTTPS/WSS to webrtc.espressif.com.
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_CERTIFICATE_BUNDLE", True)
-    # PSRAM for the media/jitter buffers; keep small allocations internal (the
-    # upstream demo does this -- helps mbedTLS/DTLS).
+
+    # === PSRAM / lwIP ===
     add_idf_sdkconfig_option("CONFIG_SPIRAM", True)
     add_idf_sdkconfig_option("CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP", True)
     add_idf_sdkconfig_option("CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL", 256)
-    # esp_peer's ICE transport references struct sockaddr_in6 (IPv6).
     add_idf_sdkconfig_option("CONFIG_LWIP_IPV6", True)
-    # ICE candidate gathering opens many concurrent UDP sockets.
     add_idf_sdkconfig_option("CONFIG_LWIP_MAX_UDP_PCBS", 1024)
     add_idf_sdkconfig_option("CONFIG_LWIP_UDP_RECVMBOX_SIZE", 64)
     add_idf_sdkconfig_option("CONFIG_LWIP_TCPIP_RECVMBOX_SIZE", 64)
