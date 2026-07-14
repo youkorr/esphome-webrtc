@@ -185,11 +185,23 @@ async def to_code(config):
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_SSL_DTLS_SRTP", True)
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_X509_CREATE_C", True)
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC", True)
+    # WebRTC DTLS uses an ECDSA self-signed cert + ECDHE-ECDSA-AES-GCM
+    # ciphersuites. Plain ESP-IDF has these on by default (the upstream demo
+    # omits them) but ESPHome trims ciphersuites its own client TLS doesn't use,
+    # which yields -0x7080 (MBEDTLS_ERR_SSL_FEATURE_UNAVAILABLE) in the DTLS
+    # handshake. Force the pieces on.
+    add_idf_sdkconfig_option("CONFIG_MBEDTLS_ECDH_C", True)
+    add_idf_sdkconfig_option("CONFIG_MBEDTLS_ECDSA_C", True)
+    add_idf_sdkconfig_option("CONFIG_MBEDTLS_ECP_DP_SECP256R1_ENABLED", True)
+    add_idf_sdkconfig_option("CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA", True)
+    add_idf_sdkconfig_option("CONFIG_MBEDTLS_GCM_C", True)
     # Cert bundle for HTTPS/WSS to webrtc.espressif.com.
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_CERTIFICATE_BUNDLE", True)
-    # PSRAM for the media/jitter buffers.
+    # PSRAM for the media/jitter buffers; keep small allocations internal (the
+    # upstream demo does this -- helps mbedTLS/DTLS).
     add_idf_sdkconfig_option("CONFIG_SPIRAM", True)
     add_idf_sdkconfig_option("CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP", True)
+    add_idf_sdkconfig_option("CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL", 256)
     # esp_peer's ICE transport references struct sockaddr_in6 (IPv6).
     add_idf_sdkconfig_option("CONFIG_LWIP_IPV6", True)
     # ICE candidate gathering opens many concurrent UDP sockets.
