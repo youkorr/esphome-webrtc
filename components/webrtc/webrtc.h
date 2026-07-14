@@ -4,6 +4,8 @@
 #include "esphome/core/automation.h"
 #include "esphome/core/helpers.h"
 
+#include "signaling.h"
+
 #include <atomic>
 #include <string>
 #include <vector>
@@ -13,7 +15,6 @@
 namespace esphome {
 namespace webrtc {
 
-// Mirror the Python enums (see __init__.py). Values match esp_peer's codecs.
 enum VideoCodec {
   VIDEO_CODEC_NONE = 0,
   VIDEO_CODEC_H264,
@@ -27,7 +28,6 @@ enum AudioCodec {
   AUDIO_CODEC_OPUS,
 };
 
-// Matches esp_peer_media_dir_t (SEND_ONLY=1<<0, RECV_ONLY=1<<1).
 enum MediaDir {
   MEDIA_DIR_NONE = 0,
   MEDIA_DIR_SEND_ONLY = 1 << 0,
@@ -64,7 +64,6 @@ class WebRTCComponent : public Component {
     this->ice_servers_.push_back(IceServer{url, user, pass});
   }
 
-  // Runtime control (automation actions).
   void start();
   void stop();
   void send_data(const std::string &data);
@@ -83,10 +82,15 @@ class WebRTCComponent : public Component {
 
   // Called from the esp_peer state callback (peer task).
   void on_peer_state_(int state);
+  // Local SDP/ICE from esp_peer -> forward to the signaling server.
+  void send_local_signal_(int msg_type, const uint8_t *data, int size);
 
  protected:
   bool open_peer_();
   static void task_fn_(void *arg);  // runs esp_peer main_loop
+  // Remote SDP/ICE from signaling -> feed into esp_peer.
+  void feed_remote_sdp_(const std::string &sdp);
+  void feed_remote_candidate_(const std::string &candidate);
 
   std::string room_id_{"esphome_room"};
   VideoCodec video_codec_{VIDEO_CODEC_H264};
@@ -101,7 +105,8 @@ class WebRTCComponent : public Component {
   bool auto_start_attempted_{false};
   std::vector<IceServer> ice_servers_;
 
-  // Opaque esp_peer handles/pointers (kept void* to avoid leaking C headers).
+  ApprtcSignaling signaling_;
+
   void *peer_{nullptr};       // esp_peer_handle_t
   const void *ops_{nullptr};  // const esp_peer_ops_t *
   void *ice_cfgs_{nullptr};   // heap esp_peer_ice_server_cfg_t[]; outlives open()
@@ -109,7 +114,6 @@ class WebRTCComponent : public Component {
   volatile bool run_{false};
   bool started_{false};
   std::atomic<bool> connected_{false};
-  // Bitmask of esp_peer states seen on the peer task; drained in loop().
   std::atomic<uint32_t> pending_states_{0};
 
   CallbackManager<void()> on_connected_;

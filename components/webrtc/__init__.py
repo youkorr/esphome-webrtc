@@ -2,14 +2,10 @@
 built directly on Espressif's clean, registry-published `esp_peer`
 (PeerConnection: ICE/STUN/TURN, DTLS-SRTP, SCTP data channel).
 
-Unlike the esp_webrtc wrapper, esp_peer only handles TRANSPORT: the app feeds
-it encoded frames and receives the peer's encoded frames via callbacks. That
-lets us plug it into youkorr's own media components (esp_video + esp_h264 for
-capture/encode, the ip-camera-viewer edge264 decoder -> LVGL canvas, fdaudio),
-instead of Espressif's GMF stack -- so it can live in the SAME firmware as LVGL.
-
-Phase 1 (this file): drive esp_peer (open + main_loop + state events).
-Signaling (AppRTC client) and media plumbing are added in later phases.
+esp_peer only handles TRANSPORT; this component adds a small AppRTC signaling
+client (signaling.cpp) and, in later phases, plugs esp_peer into youkorr's own
+media components (esp_video + esp_h264 capture/encode, the ip-camera-viewer
+edge264 decoder -> LVGL canvas, fdaudio) so it can share a firmware with LVGL.
 
 ESP32-P4 + ESP-IDF only.
 """
@@ -22,6 +18,7 @@ from esphome.const import CONF_ID, CONF_TRIGGER_ID, CONF_URL
 from esphome.components.esp32 import (
     add_idf_component,
     add_idf_sdkconfig_option,
+    include_builtin_idf_component,
     only_on_variant,
 )
 from esphome.components.esp32.const import VARIANT_ESP32P4
@@ -174,24 +171,26 @@ async def to_code(config):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         await automation.build_automation(trigger, [], conf)
 
-    # --- The ONE clean dependency: esp_peer from the ESP Component Registry ---
-    # Self-contained (depends only on esp_libsrtp) and ships its prebuilt
-    # libpeer_default.a for the P4. No override_path, no sibling git components,
-    # no version conflicts -- this is what finally builds cleanly.
+    # --- esp_peer (registry) : the WebRTC transport ---
     add_idf_component(name="espressif/esp_peer", ref="~1.5")
+    # AppRTC signaling client uses a WebSocket + HTTP + cJSON.
+    add_idf_component(name="espressif/esp_websocket_client", ref="~1.4")
+    # cJSON (json) and esp_http_client are built-in IDF components; ESPHome
+    # 2026.2+ drops unused built-ins, so pull them in explicitly.
+    include_builtin_idf_component("json")
+    include_builtin_idf_component("esp_http_client")
 
     # DTLS-SRTP is mandatory for WebRTC media encryption.
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_SSL_PROTO_DTLS", True)
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_SSL_DTLS_SRTP", True)
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_X509_CREATE_C", True)
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC", True)
+    # Cert bundle for HTTPS/WSS to webrtc.espressif.com.
+    add_idf_sdkconfig_option("CONFIG_MBEDTLS_CERTIFICATE_BUNDLE", True)
     # PSRAM for the media/jitter buffers.
     add_idf_sdkconfig_option("CONFIG_SPIRAM", True)
     add_idf_sdkconfig_option("CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP", True)
-    # esp_peer's ICE transport (udp/tcp/tls.c) references struct sockaddr_in6
-    # unconditionally; that type only exists with lwIP IPv6 enabled. Plain
-    # ESP-IDF defaults IPv6 on (so the upstream demo omits it) but ESPHome
-    # defaults it off -> "storage size of 'sin6' isn't known".
+    # esp_peer's ICE transport references struct sockaddr_in6 (IPv6).
     add_idf_sdkconfig_option("CONFIG_LWIP_IPV6", True)
     # ICE candidate gathering opens many concurrent UDP sockets.
     add_idf_sdkconfig_option("CONFIG_LWIP_MAX_UDP_PCBS", 1024)

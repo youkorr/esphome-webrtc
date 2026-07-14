@@ -49,12 +49,11 @@ static int peer_on_state(esp_peer_state_t state, void *ctx) {
   return 0;
 }
 
-// Outgoing signaling message (local SDP / ICE candidate). Phase 2 will forward
-// this to the AppRTC signaling server; for now we just log that it fired.
+// Local SDP / ICE candidate produced by esp_peer -> send via signaling.
 static int peer_on_msg(esp_peer_msg_t *msg, void *ctx) {
-  if (msg != nullptr) {
-    ESP_LOGD(TAG, "[signaling TODO] local msg type=%d size=%d", static_cast<int>(msg->type),
-             msg->size);
+  if (msg != nullptr && msg->data != nullptr && msg->size > 0) {
+    static_cast<WebRTCComponent *>(ctx)->send_local_signal_(static_cast<int>(msg->type), msg->data,
+                                                            msg->size);
   }
   return 0;
 }
@@ -62,8 +61,8 @@ static int peer_on_msg(esp_peer_msg_t *msg, void *ctx) {
 static int peer_on_video_info(esp_peer_video_stream_info_t *info, void *ctx) { return 0; }
 static int peer_on_audio_info(esp_peer_audio_stream_info_t *info, void *ctx) { return 0; }
 
-// Incoming ENCODED frames from the peer. Phase 3: video -> edge264 decode ->
-// LVGL canvas; audio -> decode -> fdaudio speaker.
+// Incoming ENCODED frames. Phase 3: video -> edge264 decode -> LVGL canvas;
+// audio -> decode -> fdaudio speaker.
 static int peer_on_video_data(esp_peer_video_frame_t *frame, void *ctx) { return 0; }
 static int peer_on_audio_data(esp_peer_audio_frame_t *frame, void *ctx) { return 0; }
 
@@ -71,6 +70,39 @@ void WebRTCComponent::on_peer_state_(int state) {
   if (state >= 0 && state < 32) {
     this->pending_states_.fetch_or(1u << state, std::memory_order_relaxed);
   }
+}
+
+void WebRTCComponent::send_local_signal_(int msg_type, const uint8_t *data, int size) {
+  std::string s(reinterpret_cast<const char *>(data), size);
+  if (msg_type == ESP_PEER_MSG_TYPE_SDP) {
+    this->signaling_.send_sdp(s);
+  } else if (msg_type == ESP_PEER_MSG_TYPE_CANDIDATE) {
+    this->signaling_.send_candidate(s);
+  }
+}
+
+void WebRTCComponent::feed_remote_sdp_(const std::string &sdp) {
+  if (this->peer_ == nullptr) {
+    return;
+  }
+  const esp_peer_ops_t *ops = static_cast<const esp_peer_ops_t *>(this->ops_);
+  esp_peer_msg_t m = {};
+  m.type = ESP_PEER_MSG_TYPE_SDP;
+  m.data = reinterpret_cast<uint8_t *>(const_cast<char *>(sdp.data()));
+  m.size = static_cast<int>(sdp.size());
+  ops->send_msg(static_cast<esp_peer_handle_t>(this->peer_), &m);
+}
+
+void WebRTCComponent::feed_remote_candidate_(const std::string &candidate) {
+  if (this->peer_ == nullptr) {
+    return;
+  }
+  const esp_peer_ops_t *ops = static_cast<const esp_peer_ops_t *>(this->ops_);
+  esp_peer_msg_t m = {};
+  m.type = ESP_PEER_MSG_TYPE_CANDIDATE;
+  m.data = reinterpret_cast<uint8_t *>(const_cast<char *>(candidate.data()));
+  m.size = static_cast<int>(candidate.size());
+  ops->send_msg(static_cast<esp_peer_handle_t>(this->peer_), &m);
 }
 
 void WebRTCComponent::setup() {
@@ -88,8 +120,6 @@ bool WebRTCComponent::open_peer_() {
   }
   const esp_peer_ops_t *ops = static_cast<const esp_peer_ops_t *>(this->ops_);
 
-  // ICE server array must outlive open(): own it on the heap, pointing into
-  // the persistent ice_servers_ strings.
   if (!this->ice_servers_.empty() && this->ice_cfgs_ == nullptr) {
     auto *arr = new esp_peer_ice_server_cfg_t[this->ice_servers_.size()]{};
     for (size_t i = 0; i < this->ice_servers_.size(); i++) {
@@ -103,7 +133,7 @@ bool WebRTCComponent::open_peer_() {
     this->ice_cfgs_ = arr;
   }
 
-  esp_peer_default_cfg_t default_cfg = {};  // all-zero => library defaults
+  esp_peer_default_cfg_t default_cfg = {};
 
   esp_peer_cfg_t cfg = {};
   cfg.server_lists = static_cast<esp_peer_ice_server_cfg_t *>(this->ice_cfgs_);
@@ -163,14 +193,27 @@ void WebRTCComponent::start() {
   const esp_peer_ops_t *ops = static_cast<const esp_peer_ops_t *>(this->ops_);
   auto handle = static_cast<esp_peer_handle_t>(this->peer_);
 
+  // Wire signaling -> peer (runs on the websocket task).
+  this->signaling_.on_remote_sdp = [this](const std::string &sdp) { this->feed_remote_sdp_(sdp); };
+  this->signaling_.on_remote_candidate = [this](const std::string &c) {
+    this->feed_remote_candidate_(c);
+  };
+  this->signaling_.on_bye = [this]() { ESP_LOGI(TAG, "peer sent bye"); };
+
+  // esp_peer main_loop task.
   this->run_ = true;
   xTaskCreatePinnedToCore(task_fn_, "webrtc_peer", 8192, this, 5,
                           reinterpret_cast<TaskHandle_t *>(&this->task_), 0);
 
-  // Start ICE gathering / connection. Without signaling (Phase 2) the local
-  // SDP produced here has nowhere to go, so it will not connect yet -- this is
-  // the Phase 1 build/boot proof.
-  ESP_LOGI(TAG, "Starting WebRTC (signaling not implemented yet -- Phase 2)");
+  // Join the signaling room (blocking HTTP).
+  std::string url = "https://webrtc.espressif.com/join/" + this->room_id_;
+  ESP_LOGI(TAG, "Joining signaling room: %s", url.c_str());
+  if (!this->signaling_.start(url)) {
+    ESP_LOGE(TAG, "signaling join failed");
+  }
+
+  // Create the peer connection: this generates the local offer, which arrives
+  // via peer_on_msg and is posted through signaling.
   ops->new_connection(handle);
   this->started_ = true;
 }
@@ -182,6 +225,7 @@ void WebRTCComponent::stop() {
   const esp_peer_ops_t *ops = static_cast<const esp_peer_ops_t *>(this->ops_);
   auto handle = static_cast<esp_peer_handle_t>(this->peer_);
   ESP_LOGI(TAG, "Stopping WebRTC");
+  this->signaling_.stop();
   if (ops->disconnect != nullptr) {
     ops->disconnect(handle);
   }
@@ -242,7 +286,7 @@ void WebRTCComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Data channel: %s", YESNO(this->enable_data_channel_));
   ESP_LOGCONFIG(TAG, "  Auto start: %s", YESNO(this->auto_start_));
   ESP_LOGCONFIG(TAG, "  ICE servers: %u", (unsigned) this->ice_servers_.size());
-  ESP_LOGCONFIG(TAG, "  Signaling: NOT IMPLEMENTED (Phase 2)");
+  ESP_LOGCONFIG(TAG, "  Signaling: AppRTC (webrtc.espressif.com)");
 }
 
 }  // namespace webrtc
