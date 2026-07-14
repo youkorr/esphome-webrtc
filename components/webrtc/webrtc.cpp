@@ -101,19 +101,12 @@ bool WebRTCComponent::open_() {
   this->signal_url_full_ = this->build_signal_url_();
 
   esp_webrtc_cfg_t cfg = {};
-  switch (this->signaling_) {
-    case SIGNALING_WHIP:
-      cfg.signaling_impl = esp_signaling_get_whip_impl();
-      break;
-    // NOTE: janus is intentionally not handled -- esp-webrtc-solution v1.0.0
-    // has no janus_signal impl, so esp_signaling_get_janus_impl() must not be
-    // referenced (it would fail to link). SIGNALING_JANUS is not selectable
-    // from YAML. Re-add the case + the janus_signal component to restore it.
-    case SIGNALING_APPRTC:
-    default:
-      cfg.signaling_impl = esp_signaling_get_apprtc_impl();
-      break;
-  }
+  // Only the AppRTC signaling impl is linked in (see __init__.py: we pull just
+  // components/esp_webrtc/impl/apprtc_signal). whip/janus are not selectable
+  // from YAML, so esp_signaling_get_whip_impl()/get_janus_impl() are not
+  // referenced (they would fail to link). To restore them, add their impl
+  // components and re-add the switch cases.
+  cfg.signaling_impl = esp_signaling_get_apprtc_impl();
   cfg.signaling_cfg.signal_url = const_cast<char *>(this->signal_url_full_.c_str());
   cfg.peer_impl = esp_peer_get_default_impl();
 
@@ -263,8 +256,7 @@ void WebRTCComponent::loop() {
 
 void WebRTCComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "WebRTC:");
-  static const char *const SIG[] = {"apprtc", "whip", "janus"};
-  ESP_LOGCONFIG(TAG, "  Signaling: %s", SIG[this->signaling_]);
+  ESP_LOGCONFIG(TAG, "  Signaling: apprtc");
   ESP_LOGCONFIG(TAG, "  Signal URL: %s", this->build_signal_url_().c_str());
   ESP_LOGCONFIG(TAG, "  Board: %s", this->board_.c_str());
   ESP_LOGCONFIG(TAG, "  Video: %ux%u @%ufps", this->video_width_, this->video_height_,

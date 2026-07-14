@@ -65,11 +65,12 @@ SendDataAction = webrtc_ns.class_("SendDataAction", automation.Action)
 
 # Enums shared with C++ (see webrtc.h)
 Signaling = webrtc_ns.enum("Signaling")
-# janus is not available at esp-webrtc-solution v1.0.0 (no impl/janus_signal),
-# so it is not offered here. apprtc + whip only.
+# Only the AppRTC signaling impl is pulled (components/esp_webrtc/impl/
+# apprtc_signal), matching the proven webrtc_call recipe. whip/janus impls are
+# not declared, so they are not offered here (referencing their
+# esp_signaling_get_*_impl() would fail to link).
 SIGNALING = {
     "apprtc": Signaling.SIGNALING_APPRTC,
-    "whip": Signaling.SIGNALING_WHIP,
 }
 
 VideoCodec = webrtc_ns.enum("VideoCodec")
@@ -210,52 +211,32 @@ async def to_code(config):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         await automation.build_automation(trigger, [], conf)
 
-    # --- esp-webrtc-solution components (git, NOT registry) ---
-    # None of esp_webrtc / esp_capture / av_render / codec_board are published
-    # to the ESP Component Registry as usable packages; they live in the
-    # esp-webrtc-solution monorepo and the upstream demos consume them via
-    # EXTRA_COMPONENT_DIRS. ESPHome can't do that, so we fetch them by git.
-    #
-    # Pinned to v1.0.0 (the C++ targets the ~0.9.1 API; v1.0.0 is the closest
-    # stable tag). Layout matches the v1.0.0 videocall_demo -- newer refs
-    # differ (e.g. janus_signal only exists later).
-    webrtc_repo = "https://github.com/espressif/esp-webrtc-solution.git"
-    webrtc_ref = "v1.0.0"
+    # --- esp-webrtc-solution components ---
+    # Proven recipe from youkorr's working webrtc_call component (compiled +
+    # LAN-validated). The key: track the `main` branch (NOT a release tag) and
+    # take esp_capture from the REGISTRY. On main, esp_capture ~0.8 ships its
+    # src/render impls bundled and esp_webrtc pulls av_render / media_lib_utils
+    # transitively -- so we only need FOUR git path-components. The v1.0.0 tag
+    # instead splits those impls into sibling components whose relative `path:`
+    # deps (e.g. `esp_capture: {path: ../../../../esp_capture}`) break when the
+    # IDF component manager fetches each in isolation. Do not pin a tag here.
+    WEBRTC_REPO = "https://github.com/espressif/esp-webrtc-solution"
+    WEBRTC_REF = "main"
 
-    def webrtc_git(name, path):
-        add_idf_component(name=name, repo=webrtc_repo, ref=webrtc_ref, path=path)
-
-    # Core component dirs, pulled WHOLE from the v1.0.0 snapshot. Whole (not
-    # sub-path) so each core's manifest can resolve its internal `path:` deps,
-    # and all from the SAME snapshot so their inter-component version
-    # constraints agree (mixing git v1.0.0 codec_board with a registry
-    # av_render 0.9.x pulled incompatible esp_codec_dev ranges: ~1.3.4 vs ~1.4).
-    # Being declared deps, their relative override_path fields are ignored, so
-    # the registry supplies the leaf deps (esp_peer, media_lib_utils,
-    # esp_codec_dev, nghttp, esp_websocket_client) at v1.0.0-compatible versions.
-    webrtc_git("esp_webrtc", "components/esp_webrtc")
-    webrtc_git("esp_capture", "components/esp_capture")
-    webrtc_git("av_render", "components/av_render")
-    webrtc_git("codec_board", "components/codec_board")
-
-    # Selected impl plugins (the cores don't force these; the demo picks them).
-    # peer_default -> esp_peer_get_default_impl(); apprtc/whip -> signaling
-    # (janus does not exist at v1.0.0).
-    webrtc_git("peer_default", "components/esp_webrtc/impl/peer_default")
-    webrtc_git("apprtc_signal", "components/esp_webrtc/impl/apprtc_signal")
-    webrtc_git("whip_signal", "components/esp_webrtc/impl/whip_signal")
-    # esp_capture src + encoder impls used by media_sys.c.
-    webrtc_git("capture_audio_src", "components/esp_capture/src/impl/capture_audio_src")
-    webrtc_git("capture_video_src", "components/esp_capture/src/impl/capture_video_src")
-    webrtc_git("capture_audio_enc", "components/esp_capture/src/impl/capture_audio_enc")
-    webrtc_git("capture_video_enc", "components/esp_capture/src/impl/capture_video_enc")
-    # av_render I2S + LCD renderers used by media_sys.c.
-    webrtc_git("render_impl", "components/av_render/render_impl")
-
-    # Registry leaves: hardware H.264 (version matching the v1.0.0 demo) + the
-    # P4 camera stack.
+    # Registry: hardware H.264 + the capture stack (pulls esp_video, av_render,
+    # media_lib_utils, esp_codec_dev, ... transitively at compatible versions).
     add_idf_component(name="espressif/esp_h264", ref="1.0.4")
-    add_idf_component(name="espressif/esp_video", ref="~1.0")
+    add_idf_component(name="espressif/esp_capture", ref="~0.8")
+
+    # Git path-components (not in the registry): the WebRTC stack, the peer
+    # transport, codec_board, and the AppRTC signaling impl.
+    for _name, _path in (
+        ("codec_board", "components/codec_board"),
+        ("esp_peer", "components/esp_peer"),
+        ("esp_webrtc", "components/esp_webrtc"),
+        ("apprtc_signal", "components/esp_webrtc/impl/apprtc_signal"),
+    ):
+        add_idf_component(name=_name, repo=WEBRTC_REPO, ref=WEBRTC_REF, path=_path)
 
     # --- sdkconfig required by ESP-WebRTC on the ESP32-P4 ---
     # DTLS-SRTP is mandatory for WebRTC media encryption.
@@ -275,11 +256,8 @@ async def to_code(config):
     # the decisive fix for the boot-time audio crash -- keep both set wherever
     # this component does I2S via codec_board.
     add_idf_sdkconfig_option("CONFIG_I2S_ISR_IRAM_SAFE", True)
-    # Experimental features used by the esp_video/ISP pipeline on the P4.
+    # Experimental features used by the esp_video pipeline on the P4.
     add_idf_sdkconfig_option("CONFIG_IDF_EXPERIMENTAL_FEATURES", True)
-    add_idf_sdkconfig_option(
-        "CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER", True
-    )
     # Bidirectional A/V + ICE candidate gathering opens many concurrent UDP
     # sockets; the IDF defaults are too low (matches upstream videocall_demo).
     add_idf_sdkconfig_option("CONFIG_LWIP_MAX_UDP_PCBS", 1024)
