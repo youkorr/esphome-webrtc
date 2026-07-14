@@ -146,9 +146,12 @@ bool ApprtcSignaling::start(const std::string &signal_url) {
     return false;
   }
 
-  // 2) Connect the WebSocket.
+  // 2) Connect the WebSocket. The AppRTC server checks the Origin header and
+  // returns 403 without it; store it in a member so it outlives start().
+  this->origin_ = "Origin: " + this->base_url_ + "\r\n";
   esp_websocket_client_config_t wcfg = {};
   wcfg.uri = this->wss_url_.c_str();
+  wcfg.headers = this->origin_.c_str();
   wcfg.crt_bundle_attach = esp_crt_bundle_attach;
   wcfg.buffer_size = 20 * 1024;
   wcfg.network_timeout_ms = 10000;

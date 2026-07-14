@@ -45,6 +45,7 @@ class ApprtcSignaling {
   std::string client_id_;
   std::string wss_url_;
   std::string message_url_;
+  std::string origin_;  // "Origin: <base_url>\r\n" header for the WebSocket
   bool is_initiator_{false};
   void *ws_{nullptr};  // esp_websocket_client_handle_t
 };
