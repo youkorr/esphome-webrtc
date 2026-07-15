@@ -4,9 +4,13 @@
 
 #include "esphome/core/log.h"
 #include "esphome/components/network/util.h"
+#include "esphome/components/microphone/microphone.h"
+#include "esphome/components/speaker/speaker.h"
+#include "esphome/components/audio/audio.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/ringbuf.h"
 
 extern "C" {
 #include "esp_peer.h"
@@ -17,6 +21,105 @@ namespace esphome {
 namespace webrtc {
 
 static const char *const TAG = "webrtc";
+
+// G.711 telephony is always 8 kHz mono; a 20 ms frame is 160 samples.
+static constexpr uint32_t G711_RATE = 8000;
+static constexpr int G711_FRAME_SAMPLES = 160;  // 20 ms @ 8 kHz
+
+// ---------------------------------------------------------------------------
+// G.711 A-law / u-law (ITU-T reference, Sun Microsystems public-domain impl).
+// esp_peer transports ENCODED audio, so we (de)compress PCM16 <-> G.711 here.
+// ---------------------------------------------------------------------------
+#define G711_SIGN_BIT 0x80
+#define G711_QUANT_MASK 0x0f
+#define G711_SEG_SHIFT 4
+#define G711_SEG_MASK 0x70
+
+static const int16_t seg_aend[8] = {0x1F, 0x3F, 0x7F, 0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF};
+static const int16_t seg_uend[8] = {0x3F, 0x7F, 0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF, 0x1FFF};
+
+static int g711_search(int val, const int16_t *table, int size) {
+  for (int i = 0; i < size; i++) {
+    if (val <= table[i])
+      return i;
+  }
+  return size;
+}
+
+static uint8_t linear_to_alaw(int16_t pcm_val) {
+  int mask, seg;
+  uint8_t aval;
+  pcm_val = pcm_val >> 3;  // 16-bit -> 13-bit
+  if (pcm_val >= 0) {
+    mask = 0xD5;
+  } else {
+    mask = 0x55;
+    pcm_val = -pcm_val - 1;
+    if (pcm_val < 0)
+      pcm_val = 0;
+  }
+  seg = g711_search(pcm_val, seg_aend, 8);
+  if (seg >= 8)
+    return (uint8_t) (0x7F ^ mask);
+  aval = seg << G711_SEG_SHIFT;
+  if (seg < 2)
+    aval |= (pcm_val >> 1) & G711_QUANT_MASK;
+  else
+    aval |= (pcm_val >> seg) & G711_QUANT_MASK;
+  return aval ^ mask;
+}
+
+static int16_t alaw_to_linear(uint8_t a_val) {
+  int t, seg;
+  a_val ^= 0x55;
+  t = (a_val & G711_QUANT_MASK) << 4;
+  seg = (a_val & G711_SEG_MASK) >> G711_SEG_SHIFT;
+  switch (seg) {
+    case 0:
+      t += 8;
+      break;
+    case 1:
+      t += 0x108;
+      break;
+    default:
+      t += 0x108;
+      t <<= seg - 1;
+  }
+  return (a_val & G711_SIGN_BIT) ? t : -t;
+}
+
+#define G711_BIAS 0x84
+#define G711_CLIP 8159
+
+static uint8_t linear_to_ulaw(int16_t pcm_val) {
+  int mask, seg;
+  uint8_t uval;
+  pcm_val = pcm_val >> 2;  // 16-bit -> 14-bit
+  if (pcm_val < 0) {
+    pcm_val = -pcm_val;
+    mask = 0x7F;
+  } else {
+    mask = 0xFF;
+  }
+  if (pcm_val > G711_CLIP)
+    pcm_val = G711_CLIP;
+  pcm_val += (G711_BIAS >> 2);
+  seg = g711_search(pcm_val, seg_uend, 8);
+  if (seg >= 8)
+    return (uint8_t) (0x7F ^ mask);
+  uval = (seg << 4) | ((pcm_val >> (seg + 1)) & 0xF);
+  return uval ^ mask;
+}
+
+static int16_t ulaw_to_linear(uint8_t u_val) {
+  int t;
+  u_val = ~u_val;
+  t = ((u_val & G711_QUANT_MASK) << 3) + G711_BIAS;
+  t <<= (u_val & G711_SEG_MASK) >> G711_SEG_SHIFT;
+  return (u_val & G711_SIGN_BIT) ? (G711_BIAS - t) : (t - G711_BIAS);
+}
+
+// ---- esp_peer video/audio codec mapping ----
 
 static esp_peer_video_codec_t to_peer_video(VideoCodec c) {
   switch (c) {
@@ -61,10 +164,15 @@ static int peer_on_msg(esp_peer_msg_t *msg, void *ctx) {
 static int peer_on_video_info(esp_peer_video_stream_info_t *info, void *ctx) { return 0; }
 static int peer_on_audio_info(esp_peer_audio_stream_info_t *info, void *ctx) { return 0; }
 
-// Incoming ENCODED frames. Phase 3: video -> edge264 decode -> LVGL canvas;
-// audio -> decode -> fdaudio speaker.
+// Incoming ENCODED frames. Slice 1: audio -> G.711 decode -> fdaudio speaker.
+// Video (Slice 3) -> edge264 decode -> LVGL canvas, still a stub here.
 static int peer_on_video_data(esp_peer_video_frame_t *frame, void *ctx) { return 0; }
-static int peer_on_audio_data(esp_peer_audio_frame_t *frame, void *ctx) { return 0; }
+static int peer_on_audio_data(esp_peer_audio_frame_t *frame, void *ctx) {
+  if (frame != nullptr && frame->data != nullptr && frame->size > 0) {
+    static_cast<WebRTCComponent *>(ctx)->on_audio_frame_(frame->data, frame->size);
+  }
+  return 0;
+}
 
 void WebRTCComponent::on_peer_state_(int state) {
   if (state >= 0 && state < 32) {
@@ -79,6 +187,22 @@ void WebRTCComponent::send_local_signal_(int msg_type, const uint8_t *data, int 
   } else if (msg_type == ESP_PEER_MSG_TYPE_CANDIDATE) {
     this->signaling_.send_candidate(s);
   }
+}
+
+// Peer task context: decode incoming G.711 to PCM16 @ 8 kHz and push to the
+// ESPHome speaker (speaker->play() is a thread-safe ring enqueue).
+void WebRTCComponent::on_audio_frame_(const uint8_t *data, int size) {
+  if (this->spk_ == nullptr || size <= 0)
+    return;
+  std::vector<int16_t> pcm(size);
+  if (this->audio_codec_ == AUDIO_CODEC_G711U) {
+    for (int i = 0; i < size; i++)
+      pcm[i] = ulaw_to_linear(data[i]);
+  } else {  // default A-law
+    for (int i = 0; i < size; i++)
+      pcm[i] = alaw_to_linear(data[i]);
+  }
+  this->spk_->play(reinterpret_cast<const uint8_t *>(pcm.data()), pcm.size() * sizeof(int16_t));
 }
 
 void WebRTCComponent::feed_remote_sdp_(const std::string &sdp) {
@@ -145,7 +269,8 @@ bool WebRTCComponent::open_peer_() {
   cfg.audio_dir = static_cast<esp_peer_media_dir_t>(this->audio_dir_);
   cfg.video_dir = static_cast<esp_peer_media_dir_t>(this->video_dir_);
   cfg.audio_info.codec = to_peer_audio(this->audio_codec_);
-  cfg.audio_info.sample_rate = (this->audio_codec_ == AUDIO_CODEC_OPUS) ? 16000 : 8000;
+  // G.711 is fixed 8 kHz mono; Opus is 16 kHz mono.
+  cfg.audio_info.sample_rate = (this->audio_codec_ == AUDIO_CODEC_OPUS) ? 16000 : G711_RATE;
   cfg.audio_info.channel = 1;
   cfg.video_info.codec = to_peer_video(this->video_codec_);
   cfg.video_info.width = this->video_w_;
@@ -185,6 +310,104 @@ void WebRTCComponent::task_fn_(void *arg) {
   vTaskDelete(nullptr);
 }
 
+// ---------------------------------------------------------------------------
+// Audio TX task: drain the mic ring, decimate mic_rate -> 8 kHz, G.711-encode a
+// 20 ms frame, and hand it to esp_peer. Runs whenever a call is connected; idle
+// (blocks on the empty ring) otherwise.
+// ---------------------------------------------------------------------------
+void WebRTCComponent::audio_tx_fn_(void *arg) {
+  auto *self = static_cast<WebRTCComponent *>(arg);
+  const esp_peer_ops_t *ops = static_cast<const esp_peer_ops_t *>(self->ops_);
+  auto handle = static_cast<esp_peer_handle_t>(self->peer_);
+  auto rb = static_cast<RingbufHandle_t>(self->mic_rb_);
+
+  const int decim = self->audio_rate_ >= G711_RATE ? (int) (self->audio_rate_ / G711_RATE) : 1;
+  const int need_src = G711_FRAME_SAMPLES * decim;  // mic samples per 20 ms frame
+  std::vector<int16_t> src;
+  src.reserve(need_src);
+  std::vector<uint8_t> enc(G711_FRAME_SAMPLES);
+  uint32_t pts = 0;
+
+  while (self->audio_run_) {
+    if (!self->connected_.load() || rb == nullptr) {
+      vTaskDelay(pdMS_TO_TICKS(20));
+      continue;
+    }
+    // Collect one 20 ms worth of mic PCM (bytes).
+    size_t need_bytes = (size_t) need_src * sizeof(int16_t);
+    src.clear();
+    size_t have_bytes = 0;
+    while (have_bytes < need_bytes && self->audio_run_) {
+      size_t got = 0;
+      TickType_t wait = (have_bytes == 0) ? pdMS_TO_TICKS(40) : pdMS_TO_TICKS(5);
+      void *item = xRingbufferReceiveUpTo(rb, &got, wait, need_bytes - have_bytes);
+      if (item == nullptr)
+        break;
+      const int16_t *s16 = static_cast<const int16_t *>(item);
+      size_t n = got / sizeof(int16_t);
+      for (size_t i = 0; i < n; i++)
+        src.push_back(s16[i]);
+      have_bytes += got;
+      vRingbufferReturnItem(rb, item);
+    }
+    if (src.empty())
+      continue;  // no mic data yet
+
+    // Decimate to 8 kHz and encode one G.711 byte per output sample.
+    int out = 0;
+    for (int i = 0; i + decim <= (int) src.size() && out < G711_FRAME_SAMPLES; i += decim) {
+      int16_t s = src[i];
+      enc[out++] = (self->audio_codec_ == AUDIO_CODEC_G711U) ? linear_to_ulaw(s)
+                                                             : linear_to_alaw(s);
+    }
+    if (out == 0)
+      continue;
+
+    esp_peer_audio_frame_t frame = {};
+    frame.pts = pts;
+    frame.data = enc.data();
+    frame.size = out;
+    if (ops->send_audio != nullptr)
+      ops->send_audio(handle, &frame);
+    pts += (uint32_t) (out * 1000 / G711_RATE);  // ~20 ms
+  }
+  vTaskDelete(nullptr);
+}
+
+void WebRTCComponent::on_mic_data_(const std::vector<uint8_t> &data) {
+  if (this->mic_rb_ == nullptr || data.empty())
+    return;
+  // Non-blocking: if the call pipeline is behind, drop rather than stall the mic
+  // (which is shared with voice_assistant via the callback fan-out).
+  xRingbufferSend(static_cast<RingbufHandle_t>(this->mic_rb_), data.data(), data.size(), 0);
+}
+
+void WebRTCComponent::start_audio_bridge_() {
+  if (!this->audio_bridge_enabled_() || this->bridge_active_)
+    return;
+  ESP_LOGI(TAG, "audio bridge: starting mic+speaker (G.711 @ 8 kHz)");
+  // Speaker plays decoded 8 kHz mono PCM16.
+  this->spk_->set_audio_stream_info(audio::AudioStreamInfo(16, 1, G711_RATE));
+  this->spk_->start();
+  if (!this->mic_->is_running()) {
+    this->mic_->start();
+    this->mic_started_ = true;
+  }
+  this->bridge_active_ = true;
+}
+
+void WebRTCComponent::stop_audio_bridge_() {
+  if (!this->audio_bridge_enabled_() || !this->bridge_active_)
+    return;
+  ESP_LOGI(TAG, "audio bridge: stopping mic+speaker");
+  this->spk_->stop();
+  if (this->mic_started_) {
+    this->mic_->stop();
+    this->mic_started_ = false;
+  }
+  this->bridge_active_ = false;
+}
+
 void WebRTCComponent::start() {
   if (this->started_) {
     return;
@@ -218,6 +441,26 @@ void WebRTCComponent::start() {
   xTaskCreatePinnedToCore(task_fn_, "webrtc_peer", 8192, this, 5,
                           reinterpret_cast<TaskHandle_t *>(&this->task_), 0);
 
+  // 4b) Audio bridge: mic ring + callback + G.711 TX task (only if configured).
+  if (this->audio_bridge_enabled_()) {
+    if (this->mic_rb_ == nullptr) {
+      this->mic_rb_ = xRingbufferCreate(16 * 1024, RINGBUF_TYPE_BYTEBUF);
+      if (this->mic_rb_ == nullptr)
+        ESP_LOGE(TAG, "mic ring buffer alloc failed");
+    }
+    if (!this->mic_subscribed_ && this->mic_rb_ != nullptr) {
+      this->mic_->add_data_callback(
+          [this](const std::vector<uint8_t> &d) { this->on_mic_data_(d); });
+      this->mic_subscribed_ = true;
+    }
+    if (this->mic_rb_ != nullptr && this->audio_tx_task_ == nullptr) {
+      this->audio_run_ = true;
+      xTaskCreatePinnedToCore(audio_tx_fn_, "webrtc_atx", 4096, this, 5,
+                              reinterpret_cast<TaskHandle_t *>(&this->audio_tx_task_), 0);
+    }
+    ESP_LOGI(TAG, "audio bridge ready (mic rate %u Hz -> G.711 8 kHz)", (unsigned) this->audio_rate_);
+  }
+
   // 5) Open the WebSocket and replay the queued offer (answerer: this feeds the
   // peer's offer, so esp_peer produces the answer via on_msg).
   this->signaling_.connect();
@@ -236,6 +479,9 @@ void WebRTCComponent::stop() {
   const esp_peer_ops_t *ops = static_cast<const esp_peer_ops_t *>(this->ops_);
   auto handle = static_cast<esp_peer_handle_t>(this->peer_);
   ESP_LOGI(TAG, "Stopping WebRTC");
+  this->stop_audio_bridge_();
+  this->audio_run_ = false;
+  this->audio_tx_task_ = nullptr;
   this->signaling_.stop();
   if (ops->disconnect != nullptr) {
     ops->disconnect(handle);
@@ -276,16 +522,19 @@ void WebRTCComponent::loop() {
   if (evs & (1u << ESP_PEER_STATE_CONNECTED)) {
     ESP_LOGI(TAG, "connected");
     this->connected_ = true;
+    this->start_audio_bridge_();  // bring up mic+speaker for the call
     this->on_connected_.call();
   }
   if (evs & (1u << ESP_PEER_STATE_CONNECT_FAILED)) {
     ESP_LOGW(TAG, "connect failed");
     this->connected_ = false;
+    this->stop_audio_bridge_();
     this->on_connect_failed_.call();
   }
   if (evs & (1u << ESP_PEER_STATE_DISCONNECTED)) {
     ESP_LOGI(TAG, "disconnected");
     this->connected_ = false;
+    this->stop_audio_bridge_();
     this->on_disconnected_.call();
   }
 }
@@ -297,6 +546,9 @@ void WebRTCComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Data channel: %s", YESNO(this->enable_data_channel_));
   ESP_LOGCONFIG(TAG, "  Auto start: %s", YESNO(this->auto_start_));
   ESP_LOGCONFIG(TAG, "  ICE servers: %u", (unsigned) this->ice_servers_.size());
+  if (this->audio_bridge_enabled_())
+    ESP_LOGCONFIG(TAG, "  Audio bridge: fdaudio mic+speaker, G.711 (rate %u Hz)",
+                  (unsigned) this->audio_rate_);
   ESP_LOGCONFIG(TAG, "  Signaling: AppRTC (webrtc.espressif.com)");
 }
 
