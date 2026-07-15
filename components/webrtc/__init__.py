@@ -3,9 +3,10 @@ built directly on Espressif's clean, registry-published `esp_peer`
 (PeerConnection: ICE/STUN/TURN, DTLS-SRTP, SCTP data channel).
 
 esp_peer only handles TRANSPORT; this component adds a small AppRTC signaling
-client (signaling.cpp) and, in later phases, plugs esp_peer into youkorr's own
-media components (esp_video + esp_h264 capture/encode, the ip-camera-viewer
-edge264 decoder -> LVGL canvas, fdaudio) so it can share a firmware with LVGL.
+client (signaling.cpp), a G.711 audio bridge that shares fdaudio's mic/speaker
+(via the ESPHome microphone + speaker platforms, so it coexists with
+voice_assistant), and — in later phases — the esp_video/esp_h264 capture path
+and the ip-camera-viewer edge264 decoder -> LVGL canvas.
 
 ESP32-P4 + ESP-IDF only.
 """
@@ -13,7 +14,8 @@ ESP32-P4 + ESP-IDF only.
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
-from esphome.const import CONF_ID, CONF_TRIGGER_ID, CONF_URL
+from esphome.components import microphone, speaker
+from esphome.const import CONF_ID, CONF_TRIGGER_ID, CONF_URL, CONF_SAMPLE_RATE
 
 from esphome.components.esp32 import (
     add_idf_component,
@@ -25,6 +27,8 @@ from esphome.components.esp32.const import VARIANT_ESP32P4
 
 CODEOWNERS = ["@youkorr"]
 DEPENDENCIES = ["esp32", "network"]
+# So webrtc.cpp can include the mic/speaker headers for the fdaudio audio bridge.
+AUTO_LOAD = ["microphone", "speaker"]
 
 CONF_ROOM_ID = "room_id"
 CONF_VIDEO_CODEC = "video_codec"
@@ -39,6 +43,8 @@ CONF_AUTO_START = "auto_start"
 CONF_ICE_SERVERS = "ice_servers"
 CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
+CONF_MICROPHONE_ID = "microphone_id"
+CONF_SPEAKER_ID = "speaker_id"
 CONF_ON_CONNECTED = "on_connected"
 CONF_ON_DISCONNECTED = "on_disconnected"
 CONF_ON_PAIRED = "on_paired"
@@ -91,6 +97,17 @@ ICE_SERVER_SCHEMA = cv.Schema(
     }
 )
 
+
+def _validate_bridge(config):
+    # The audio bridge needs BOTH the mic and the speaker (full-duplex).
+    if (CONF_MICROPHONE_ID in config) != (CONF_SPEAKER_ID in config):
+        raise cv.Invalid(
+            "microphone_id and speaker_id must be set together "
+            "(the fdaudio audio bridge needs both)"
+        )
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
@@ -99,7 +116,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_VIDEO_CODEC, default="h264"): cv.enum(
                 VIDEO_CODEC, lower=True
             ),
-            cv.Optional(CONF_AUDIO_CODEC, default="opus"): cv.enum(
+            cv.Optional(CONF_AUDIO_CODEC, default="g711a"): cv.enum(
                 AUDIO_CODEC, lower=True
             ),
             cv.Optional(CONF_VIDEO_DIRECTION, default="sendrecv"): cv.enum(
@@ -113,6 +130,15 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_FPS, default=15): cv.int_range(min=1, max=60),
             cv.Optional(CONF_ENABLE_DATA_CHANNEL, default=True): cv.boolean,
             cv.Optional(CONF_AUTO_START, default=False): cv.boolean,
+            # fdaudio audio bridge: share fdaudio's mic + speaker (via the ESPHome
+            # microphone + speaker platforms) so webrtc coexists with fdaudio +
+            # voice_assistant in one firmware. Set BOTH. PCM is mono 16-bit at
+            # `sample_rate`; the bridge decimates it to G.711's 8 kHz.
+            cv.Optional(CONF_MICROPHONE_ID): cv.use_id(microphone.Microphone),
+            cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
+            cv.Optional(CONF_SAMPLE_RATE, default=16000): cv.int_range(
+                min=8000, max=48000
+            ),
             cv.Optional(CONF_ICE_SERVERS): cv.ensure_list(ICE_SERVER_SCHEMA),
             cv.Optional(CONF_ON_CONNECTED): automation.validate_automation(
                 {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(ConnectedTrigger)}
@@ -128,6 +154,7 @@ CONFIG_SCHEMA = cv.All(
             ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
+    _validate_bridge,
     only_on_variant(supported=[VARIANT_ESP32P4]),
 )
 
@@ -148,6 +175,13 @@ async def to_code(config):
     )
     cg.add(var.set_enable_data_channel(config[CONF_ENABLE_DATA_CHANNEL]))
     cg.add(var.set_auto_start(config[CONF_AUTO_START]))
+
+    if CONF_MICROPHONE_ID in config and CONF_SPEAKER_ID in config:
+        mic = await cg.get_variable(config[CONF_MICROPHONE_ID])
+        spk = await cg.get_variable(config[CONF_SPEAKER_ID])
+        cg.add(var.set_microphone(mic))
+        cg.add(var.set_speaker(spk))
+        cg.add(var.set_audio_sample_rate(config[CONF_SAMPLE_RATE]))
 
     for srv in config.get(CONF_ICE_SERVERS, []):
         cg.add(
