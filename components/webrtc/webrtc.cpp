@@ -212,6 +212,15 @@ static void log_sdp_(const char *label, const std::string &sdp) {
 void WebRTCComponent::send_local_signal_(int msg_type, const uint8_t *data, int size) {
   std::string s(reinterpret_cast<const char *>(data), size);
   if (msg_type == ESP_PEER_MSG_TYPE_SDP) {
+    // esp_peer advertises H.264 Main profile (profile-level-id=4d001f). Browsers'
+    // WebRTC H.264 is usually Constrained Baseline only, so for a sendrecv video
+    // m-line they can't offer Main back and DECLINE the whole track (m=video 0 in
+    // the answer -> no remote video). The P4 HW encoder's stream is baseline-
+    // compatible, so rewrite the advertised profile to Constrained Baseline
+    // (42e01f); the browser then accepts and decodes it.
+    for (size_t pos = 0; (pos = s.find("4d001f", pos)) != std::string::npos; pos += 6) {
+      s.replace(pos, 6, "42e01f");
+    }
     log_sdp_("LOCAL (our offer/answer)", s);
     this->signaling_.send_sdp(s);
   } else if (msg_type == ESP_PEER_MSG_TYPE_CANDIDATE) {
