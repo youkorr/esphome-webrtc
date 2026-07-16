@@ -318,6 +318,7 @@ void WebRTCComponent::task_fn_(void *arg) {
     }
     vTaskDelay(pdMS_TO_TICKS(10));
   }
+  self->peer_task_done_ = true;
   vTaskDelete(nullptr);
 }
 
@@ -394,6 +395,7 @@ void WebRTCComponent::audio_tx_fn_(void *arg) {
                (unsigned) self->audio_tx_count_, out, (int) peak, tx_ret);
     }
   }
+  self->audio_task_done_ = true;
   vTaskDelete(nullptr);
 }
 
@@ -461,6 +463,9 @@ void WebRTCComponent::start() {
 
   // 4) esp_peer main_loop task.
   this->run_ = true;
+  this->peer_task_done_ = false;
+  this->audio_tx_count_ = 0;
+  this->audio_rx_count_ = 0;
   xTaskCreatePinnedToCore(task_fn_, "webrtc_peer", 8192, this, 5,
                           reinterpret_cast<TaskHandle_t *>(&this->task_), 0);
 
@@ -478,6 +483,7 @@ void WebRTCComponent::start() {
     }
     if (this->mic_rb_ != nullptr && this->audio_tx_task_ == nullptr) {
       this->audio_run_ = true;
+      this->audio_task_done_ = false;
       xTaskCreatePinnedToCore(audio_tx_fn_, "webrtc_atx", 4096, this, 5,
                               reinterpret_cast<TaskHandle_t *>(&this->audio_tx_task_), 0);
     }
@@ -496,22 +502,49 @@ void WebRTCComponent::start() {
 }
 
 void WebRTCComponent::stop() {
-  if (!this->started_) {
+  if (!this->started_ && this->peer_ == nullptr) {
     return;
   }
   const esp_peer_ops_t *ops = static_cast<const esp_peer_ops_t *>(this->ops_);
   auto handle = static_cast<esp_peer_handle_t>(this->peer_);
   ESP_LOGI(TAG, "Stopping WebRTC");
+
+  // 1) Stop feeding/rendering audio (also stops the mic pushing into the ring).
+  this->connected_ = false;  // the audio TX task stops sending immediately
   this->stop_audio_bridge_();
+
+  // 2) Ask both worker tasks to exit and WAIT for them: they dereference the
+  // peer handle (main_loop / send_audio), so they MUST be gone before we close
+  // it, or we get a use-after-free. Bounded wait (~600 ms) to avoid hanging.
+  const bool had_audio = (this->audio_tx_task_ != nullptr);
+  const bool had_peer = (this->task_ != nullptr);
   this->audio_run_ = false;
-  this->audio_tx_task_ = nullptr;
-  this->signaling_.stop();
-  if (ops->disconnect != nullptr) {
-    ops->disconnect(handle);
-  }
   this->run_ = false;
+  for (int i = 0; i < 60; i++) {
+    bool audio_ok = !had_audio || this->audio_task_done_;
+    bool peer_ok = !had_peer || this->peer_task_done_;
+    if (audio_ok && peer_ok)
+      break;
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  this->audio_tx_task_ = nullptr;
+  this->task_ = nullptr;
+
+  // 3) Tear down signaling (destroys the WebSocket; join() rebuilds it).
+  this->signaling_.stop();
+
+  // 4) Now it is safe to disconnect + CLOSE the peer and free it. Nulling peer_
+  // forces open_peer_() to build a fresh one on the next start() (otherwise it
+  // early-returns the dead handle -> reconnect silently fails).
+  if (ops != nullptr && handle != nullptr) {
+    if (ops->disconnect != nullptr)
+      ops->disconnect(handle);
+    if (ops->close != nullptr)
+      ops->close(handle);
+  }
+  this->peer_ = nullptr;
+
   this->started_ = false;
-  this->connected_ = false;
 }
 
 void WebRTCComponent::send_data(const std::string &data) {

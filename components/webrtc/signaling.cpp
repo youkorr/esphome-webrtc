@@ -266,12 +266,19 @@ void ApprtcSignaling::send_candidate(const std::string &candidate) {
 }
 
 void ApprtcSignaling::stop() {
+  // Tell the room we are leaving so the server frees our slot; otherwise a
+  // re-join to the SAME room sees it as full (2 clients) and mis-assigns the
+  // offerer/answerer role. AppRTC: POST <base>/leave/<room>/<client>.
+  if (!this->base_url_.empty() && !this->room_id_.empty() && !this->client_id_.empty()) {
+    http_post_(this->base_url_ + "/leave/" + this->room_id_ + "/" + this->client_id_, "");
+  }
   if (this->ws_ != nullptr) {
     esp_websocket_client_stop(static_cast<esp_websocket_client_handle_t>(this->ws_));
     esp_websocket_client_destroy(static_cast<esp_websocket_client_handle_t>(this->ws_));
     this->ws_ = nullptr;
   }
   this->client_id_.clear();
+  this->pending_msgs_.clear();
 }
 
 }  // namespace webrtc

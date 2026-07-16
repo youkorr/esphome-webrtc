@@ -146,6 +146,10 @@ class WebRTCComponent : public Component {
   bool mic_started_{false};         // did we start the mic (so we stop it on disconnect)
   void *audio_tx_task_{nullptr};    // TaskHandle_t
   volatile bool audio_run_{false};
+  // Set by each task just before it self-deletes, so stop() can WAIT for them to
+  // exit before closing the peer handle they use (avoids a use-after-free).
+  volatile bool peer_task_done_{true};
+  volatile bool audio_task_done_{true};
   uint32_t audio_tx_count_{0};      // frames sent to peer (throttled telemetry)
   uint32_t audio_rx_count_{0};      // frames received from peer (throttled telemetry)
   // Latched so start_audio_bridge_()/stop_audio_bridge_() run once per edge.
