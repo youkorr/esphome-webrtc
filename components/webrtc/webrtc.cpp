@@ -420,8 +420,8 @@ void WebRTCComponent::on_mic_data_(const std::vector<uint8_t> &data) {
 #ifdef USE_ESP_WEBRTC_VIDEO
 // ---------------------------------------------------------------------------
 // Video: share the camera's RGB565 frames (LVGL keeps its own stream), PPA
-// scale+convert to YUV420 at the negotiated size, H.264-encode on the P4 HW
-// encoder, and send to the peer. Opened lazily once connected (needs the size).
+// scale to the negotiated size, and hand RGB565 straight to the P4 HW H.264
+// encoder (it converts to YUV internally). Opened lazily once connected.
 // ---------------------------------------------------------------------------
 bool WebRTCComponent::open_video_encoder_() {
   if (this->venc_ != nullptr)
@@ -436,21 +436,22 @@ bool WebRTCComponent::open_video_encoder_() {
     return false;
   }
 
-  // YUV420 = w*h*3/2; H.264 output fits in < raw, w*h is a safe cap.
-  this->yuv_buf_size_ = (size_t) this->enc_w_ * this->enc_h_ * 3 / 2;
+  // The P4 HW encoder rejects planar I420 (ERR_ARG) but accepts RGB565 directly
+  // and does the colour conversion internally -> we only PPA-scale RGB565, no
+  // YUV step. enc input = RGB565 (w*h*2); H.264 output fits in < raw (w*h cap).
+  this->yuv_buf_size_ = (size_t) this->enc_w_ * this->enc_h_ * 2;
   this->h264_buf_size_ = (size_t) this->enc_w_ * this->enc_h_;
   this->yuv_buf_ = heap_caps_aligned_alloc(64, this->yuv_buf_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   this->h264_buf_ = heap_caps_aligned_alloc(64, this->h264_buf_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (this->yuv_buf_ == nullptr || this->h264_buf_ == nullptr) {
-    ESP_LOGE(TAG, "video buffers alloc failed (yuv=%u h264=%u)", (unsigned) this->yuv_buf_size_,
+    ESP_LOGE(TAG, "video buffers alloc failed (rgb=%u h264=%u)", (unsigned) this->yuv_buf_size_,
              (unsigned) this->h264_buf_size_);
     return false;
   }
 
   esp_h264_enc_cfg_hw_t ecfg = {};
-  // NOTE: P4 HW encoder input format. Starting with planar I420; if the encoder
-  // rejects it, try ESP_H264_RAW_FMT_O_UYY_E_VYY (P4-specific packed YUV).
-  ecfg.pic_type = ESP_H264_RAW_FMT_I420;
+  // P4 HW encoder input: RGB565 little-endian (it converts to YUV internally).
+  ecfg.pic_type = ESP_H264_RAW_FMT_RGB565_LE;
   ecfg.gop = this->video_fps_;
   ecfg.fps = this->video_fps_;
   ecfg.res.width = this->enc_w_;
@@ -525,7 +526,8 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
       continue;
     }
 
-    // PPA: RGB565 (w x h) -> YUV420 (enc_w x enc_h), scale + colour convert.
+    // PPA: RGB565 (w x h) -> RGB565 (enc_w x enc_h), scale only (the encoder
+    // does RGB565 -> YUV colour conversion itself).
     ppa_srm_oper_config_t srm = {};
     srm.in.buffer = rgb;
     srm.in.pic_w = w;
@@ -537,7 +539,7 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
     srm.out.buffer_size = self->yuv_buf_size_;
     srm.out.pic_w = self->enc_w_;
     srm.out.pic_h = self->enc_h_;
-    srm.out.srm_cm = PPA_SRM_COLOR_MODE_YUV420;
+    srm.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
     srm.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
     srm.scale_x = (float) self->enc_w_ / (float) w;
     srm.scale_y = (float) self->enc_h_ / (float) h;
@@ -551,7 +553,7 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
       continue;
     }
 
-    // Encode YUV420 -> H.264.
+    // Encode RGB565 -> H.264 (encoder converts colour internally).
     esp_h264_enc_in_frame_t in = {};
     in.raw_data.buffer = static_cast<uint8_t *>(self->yuv_buf_);
     in.raw_data.len = self->yuv_buf_size_;
@@ -675,7 +677,7 @@ void WebRTCComponent::start() {
   }
 
 #ifdef USE_ESP_WEBRTC_VIDEO
-  // 4c) Video bridge: camera RGB565 -> PPA YUV420 -> H.264 -> send_video.
+  // 4c) Video bridge: camera RGB565 -> PPA scale -> H.264 -> send_video.
   if (this->video_bridge_enabled_() && this->video_tx_task_ == nullptr) {
     this->video_run_ = true;
     this->video_task_done_ = false;
