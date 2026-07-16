@@ -451,7 +451,7 @@ bool WebRTCComponent::open_video_encoder_() {
 
   esp_h264_enc_cfg_hw_t ecfg = {};
   // P4 HW encoder input: RGB565 little-endian (it converts to YUV internally).
-  ecfg.pic_type = ESP_H264_RAW_FMT_YUYV;
+  ecfg.pic_type = ESP_H264_RAW_FMT_RGB565_LE;
   ecfg.gop = this->video_fps_;
   ecfg.fps = this->video_fps_;
   ecfg.res.width = this->enc_w_;
