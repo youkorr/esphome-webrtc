@@ -45,6 +45,8 @@ CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
 CONF_MICROPHONE_ID = "microphone_id"
 CONF_SPEAKER_ID = "speaker_id"
+CONF_CAMERA_ID = "camera_id"
+CONF_VIDEO = "video"
 CONF_ON_CONNECTED = "on_connected"
 CONF_ON_DISCONNECTED = "on_disconnected"
 CONF_ON_PAIRED = "on_paired"
@@ -52,6 +54,13 @@ CONF_ON_CONNECT_FAILED = "on_connect_failed"
 
 webrtc_ns = cg.esphome_ns.namespace("webrtc")
 WebRTCComponent = webrtc_ns.class_("WebRTCComponent", cg.Component)
+
+# The camera (from the esp_cam_sensor external component). Declared by C++ type
+# name so we can use_id() it without importing that package's Python module;
+# webrtc shares its RGB565 frames (LVGL preview keeps working) and H.264-encodes
+# them for the call. Optional: video only runs when camera_id is set.
+esp_cam_sensor_ns = cg.esphome_ns.namespace("esp_cam_sensor")
+MipiDSICamComponent = esp_cam_sensor_ns.class_("MipiDSICamComponent", cg.Component)
 
 ConnectedTrigger = webrtc_ns.class_("ConnectedTrigger", automation.Trigger.template())
 DisconnectedTrigger = webrtc_ns.class_(
@@ -139,6 +148,10 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_SAMPLE_RATE, default=16000): cv.int_range(
                 min=8000, max=48000
             ),
+            # Video: share the esp_cam_sensor camera's RGB565 frames, PPA->YUV420,
+            # H.264-encode (esp_h264 HW on P4), send to the peer. Only active when
+            # camera_id is set. The camera keeps streaming for LVGL in parallel.
+            cv.Optional(CONF_CAMERA_ID): cv.use_id(MipiDSICamComponent),
             cv.Optional(CONF_ICE_SERVERS): cv.ensure_list(ICE_SERVER_SCHEMA),
             cv.Optional(CONF_ON_CONNECTED): automation.validate_automation(
                 {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(ConnectedTrigger)}
@@ -182,6 +195,14 @@ async def to_code(config):
         cg.add(var.set_microphone(mic))
         cg.add(var.set_speaker(spk))
         cg.add(var.set_audio_sample_rate(config[CONF_SAMPLE_RATE]))
+
+    if CONF_CAMERA_ID in config:
+        cam = await cg.get_variable(config[CONF_CAMERA_ID])
+        cg.add(var.set_camera(cam))
+        # P4 hardware H.264 encoder (same version youkorr's webrtc_call used).
+        add_idf_component(name="espressif/esp_h264", ref="1.0.4")
+        # Gates the video path (esp_h264 + PPA includes) in webrtc.cpp.
+        cg.add_define("USE_ESP_WEBRTC_VIDEO")
 
     for srv in config.get(CONF_ICE_SERVERS, []):
         cg.add(
