@@ -203,6 +203,17 @@ void WebRTCComponent::on_audio_frame_(const uint8_t *data, int size) {
       pcm[i] = alaw_to_linear(data[i]);
   }
   this->spk_->play(reinterpret_cast<const uint8_t *>(pcm.data()), pcm.size() * sizeof(int16_t));
+  // Throttled RX telemetry: is the peer's audio actually arriving?
+  if ((this->audio_rx_count_++ % 100) == 0) {
+    int32_t peak = 0;
+    for (int i = 0; i < size; i++) {
+      int32_t a = pcm[i] < 0 ? -pcm[i] : pcm[i];
+      if (a > peak)
+        peak = a;
+    }
+    ESP_LOGI(TAG, "audio RX: %u frames (last %d bytes, peak=%d)",
+             (unsigned) this->audio_rx_count_, size, (int) peak);
+  }
 }
 
 void WebRTCComponent::feed_remote_sdp_(const std::string &sdp) {
@@ -367,9 +378,21 @@ void WebRTCComponent::audio_tx_fn_(void *arg) {
     frame.pts = pts;
     frame.data = enc.data();
     frame.size = out;
+    int tx_ret = 0;
     if (ops->send_audio != nullptr)
-      ops->send_audio(handle, &frame);
+      tx_ret = ops->send_audio(handle, &frame);
     pts += (uint32_t) (out * 1000 / G711_RATE);  // ~20 ms
+    // Throttled TX telemetry: are our mic frames actually going out?
+    if ((self->audio_tx_count_++ % 100) == 0) {
+      int16_t peak = 0;
+      for (int i = 0; i < (int) src.size(); i++) {
+        int16_t a = src[i] < 0 ? -src[i] : src[i];
+        if (a > peak)
+          peak = a;
+      }
+      ESP_LOGI(TAG, "audio TX: %u frames (%d bytes, mic peak=%d, ret=%d)",
+               (unsigned) self->audio_tx_count_, out, (int) peak, tx_ret);
+    }
   }
   vTaskDelete(nullptr);
 }
