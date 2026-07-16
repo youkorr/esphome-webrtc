@@ -190,9 +190,29 @@ void WebRTCComponent::on_peer_state_(int state) {
   }
 }
 
+// Log an SDP line-by-line (a 2 KB blob would be truncated by the logger) so we
+// can inspect the H.264 m-line/rtpmap/fmtp negotiation.
+static void log_sdp_(const char *label, const std::string &sdp) {
+  ESP_LOGI(TAG, "===== %s SDP (%u bytes) =====", label, (unsigned) sdp.size());
+  size_t start = 0;
+  while (start < sdp.size()) {
+    size_t nl = sdp.find('\n', start);
+    size_t end = (nl == std::string::npos) ? sdp.size() : nl;
+    std::string line = sdp.substr(start, end - start);
+    if (!line.empty() && line.back() == '\r')
+      line.pop_back();
+    if (!line.empty())
+      ESP_LOGI(TAG, "  %s", line.c_str());
+    if (nl == std::string::npos)
+      break;
+    start = nl + 1;
+  }
+}
+
 void WebRTCComponent::send_local_signal_(int msg_type, const uint8_t *data, int size) {
   std::string s(reinterpret_cast<const char *>(data), size);
   if (msg_type == ESP_PEER_MSG_TYPE_SDP) {
+    log_sdp_("LOCAL (our offer/answer)", s);
     this->signaling_.send_sdp(s);
   } else if (msg_type == ESP_PEER_MSG_TYPE_CANDIDATE) {
     this->signaling_.send_candidate(s);
@@ -230,6 +250,7 @@ void WebRTCComponent::feed_remote_sdp_(const std::string &sdp) {
   if (this->peer_ == nullptr) {
     return;
   }
+  log_sdp_("REMOTE (peer's offer/answer)", sdp);
   const esp_peer_ops_t *ops = static_cast<const esp_peer_ops_t *>(this->ops_);
   esp_peer_msg_t m = {};
   m.type = ESP_PEER_MSG_TYPE_SDP;
