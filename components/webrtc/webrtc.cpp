@@ -7,15 +7,25 @@
 #include "esphome/components/microphone/microphone.h"
 #include "esphome/components/speaker/speaker.h"
 #include "esphome/components/audio/audio.h"
+#include "esphome/components/esp_cam_sensor/esp_cam_sensor_camera.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/ringbuf.h"
+#include "esp_heap_caps.h"
 
 extern "C" {
 #include "esp_peer.h"
 #include "esp_peer_default.h"
 }
+
+#ifdef USE_ESP_WEBRTC_VIDEO
+#include "driver/ppa.h"
+extern "C" {
+#include "esp_h264_enc_single.h"
+#include "esp_h264_enc_single_hw.h"
+}
+#endif
 
 namespace esphome {
 namespace webrtc {
@@ -407,6 +417,180 @@ void WebRTCComponent::on_mic_data_(const std::vector<uint8_t> &data) {
   xRingbufferSend(static_cast<RingbufHandle_t>(this->mic_rb_), data.data(), data.size(), 0);
 }
 
+#ifdef USE_ESP_WEBRTC_VIDEO
+// ---------------------------------------------------------------------------
+// Video: share the camera's RGB565 frames (LVGL keeps its own stream), PPA
+// scale+convert to YUV420 at the negotiated size, H.264-encode on the P4 HW
+// encoder, and send to the peer. Opened lazily once connected (needs the size).
+// ---------------------------------------------------------------------------
+bool WebRTCComponent::open_video_encoder_() {
+  if (this->venc_ != nullptr)
+    return true;
+  this->enc_w_ = this->video_w_;
+  this->enc_h_ = this->video_h_;
+
+  ppa_client_config_t pcfg = {};
+  pcfg.oper_type = PPA_OPERATION_SRM;
+  if (ppa_register_client(&pcfg, reinterpret_cast<ppa_client_handle_t *>(&this->ppa_)) != ESP_OK) {
+    ESP_LOGE(TAG, "PPA client register failed");
+    return false;
+  }
+
+  // YUV420 = w*h*3/2; H.264 output fits in < raw, w*h is a safe cap.
+  this->yuv_buf_size_ = (size_t) this->enc_w_ * this->enc_h_ * 3 / 2;
+  this->h264_buf_size_ = (size_t) this->enc_w_ * this->enc_h_;
+  this->yuv_buf_ = heap_caps_aligned_alloc(64, this->yuv_buf_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  this->h264_buf_ = heap_caps_aligned_alloc(64, this->h264_buf_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (this->yuv_buf_ == nullptr || this->h264_buf_ == nullptr) {
+    ESP_LOGE(TAG, "video buffers alloc failed (yuv=%u h264=%u)", (unsigned) this->yuv_buf_size_,
+             (unsigned) this->h264_buf_size_);
+    return false;
+  }
+
+  esp_h264_enc_cfg_hw_t ecfg = {};
+  // NOTE: P4 HW encoder input format. Starting with planar I420; if the encoder
+  // rejects it, try ESP_H264_RAW_FMT_O_UYY_E_VYY (P4-specific packed YUV).
+  ecfg.pic_type = ESP_H264_RAW_FMT_I420;
+  ecfg.gop = this->video_fps_;
+  ecfg.fps = this->video_fps_;
+  ecfg.res.width = this->enc_w_;
+  ecfg.res.height = this->enc_h_;
+  ecfg.rc.bitrate = (uint32_t) this->enc_w_ * this->enc_h_ * this->video_fps_ / 20;
+  ecfg.rc.qp_min = 25;
+  ecfg.rc.qp_max = 40;
+  esp_h264_enc_handle_t enc = nullptr;
+  esp_h264_err_t herr = esp_h264_enc_hw_new(&ecfg, &enc);
+  if (herr != ESP_H264_ERR_OK || enc == nullptr) {
+    ESP_LOGE(TAG, "esp_h264_enc_hw_new failed: %d", (int) herr);
+    return false;
+  }
+  if (esp_h264_enc_open(enc) != ESP_H264_ERR_OK) {
+    ESP_LOGE(TAG, "esp_h264_enc_open failed");
+    esp_h264_enc_del(enc);
+    return false;
+  }
+  this->venc_ = enc;
+  ESP_LOGI(TAG, "H.264 encoder ready %ux%u @%ufps (bitrate %u)", this->enc_w_, this->enc_h_,
+           this->video_fps_, (unsigned) ecfg.rc.bitrate);
+  return true;
+}
+
+void WebRTCComponent::close_video_encoder_() {
+  if (this->venc_ != nullptr) {
+    esp_h264_enc_close(static_cast<esp_h264_enc_handle_t>(this->venc_));
+    esp_h264_enc_del(static_cast<esp_h264_enc_handle_t>(this->venc_));
+    this->venc_ = nullptr;
+  }
+  if (this->ppa_ != nullptr) {
+    ppa_unregister_client(static_cast<ppa_client_handle_t>(this->ppa_));
+    this->ppa_ = nullptr;
+  }
+  if (this->yuv_buf_ != nullptr) {
+    heap_caps_free(this->yuv_buf_);
+    this->yuv_buf_ = nullptr;
+  }
+  if (this->h264_buf_ != nullptr) {
+    heap_caps_free(this->h264_buf_);
+    this->h264_buf_ = nullptr;
+  }
+}
+
+void WebRTCComponent::video_tx_fn_(void *arg) {
+  auto *self = static_cast<WebRTCComponent *>(arg);
+  const esp_peer_ops_t *ops = static_cast<const esp_peer_ops_t *>(self->ops_);
+  auto handle = static_cast<esp_peer_handle_t>(self->peer_);
+  auto *cam = self->camera_;
+  const uint32_t frame_ms = 1000 / (self->video_fps_ > 0 ? self->video_fps_ : 15);
+  uint32_t pts = 0;
+
+  // The camera is shared with LVGL; start_streaming() is idempotent.
+  if (cam != nullptr && !cam->is_streaming())
+    cam->start_streaming();
+
+  while (self->video_run_) {
+    if (!self->connected_.load() || cam == nullptr) {
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
+    if (self->venc_ == nullptr && !self->open_video_encoder_()) {
+      vTaskDelay(pdMS_TO_TICKS(500));
+      continue;
+    }
+    uint32_t t0 = millis();
+    esp_cam_sensor::SimpleBufferElement *fb = nullptr;
+    uint8_t *rgb = nullptr;
+    int w = 0, h = 0;
+    if (!cam->get_current_rgb_frame(&fb, &rgb, &w, &h) || rgb == nullptr || w <= 0 || h <= 0) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+
+    // PPA: RGB565 (w x h) -> YUV420 (enc_w x enc_h), scale + colour convert.
+    ppa_srm_oper_config_t srm = {};
+    srm.in.buffer = rgb;
+    srm.in.pic_w = w;
+    srm.in.pic_h = h;
+    srm.in.block_w = w;
+    srm.in.block_h = h;
+    srm.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+    srm.out.buffer = self->yuv_buf_;
+    srm.out.buffer_size = self->yuv_buf_size_;
+    srm.out.pic_w = self->enc_w_;
+    srm.out.pic_h = self->enc_h_;
+    srm.out.srm_cm = PPA_SRM_COLOR_MODE_YUV420;
+    srm.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
+    srm.scale_x = (float) self->enc_w_ / (float) w;
+    srm.scale_y = (float) self->enc_h_ / (float) h;
+    srm.mode = PPA_TRANS_MODE_BLOCKING;
+    esp_err_t pe = ppa_do_scale_rotate_mirror(static_cast<ppa_client_handle_t>(self->ppa_), &srm);
+    cam->release_buffer(fb);  // done with the camera frame
+    if (pe != ESP_OK) {
+      if ((self->video_tx_count_ % 100) == 0)
+        ESP_LOGW(TAG, "PPA convert failed: %s", esp_err_to_name(pe));
+      vTaskDelay(pdMS_TO_TICKS(frame_ms));
+      continue;
+    }
+
+    // Encode YUV420 -> H.264.
+    esp_h264_enc_in_frame_t in = {};
+    in.raw_data.buffer = static_cast<uint8_t *>(self->yuv_buf_);
+    in.raw_data.len = self->yuv_buf_size_;
+    in.pts = pts;
+    esp_h264_enc_out_frame_t outf = {};
+    outf.raw_data.buffer = static_cast<uint8_t *>(self->h264_buf_);
+    outf.raw_data.len = self->h264_buf_size_;
+    esp_h264_err_t er =
+        esp_h264_enc_process(static_cast<esp_h264_enc_handle_t>(self->venc_), &in, &outf);
+    if (er != ESP_H264_ERR_OK) {
+      if ((self->video_tx_count_ % 100) == 0)
+        ESP_LOGW(TAG, "h264 encode failed: %d", (int) er);
+      vTaskDelay(pdMS_TO_TICKS(frame_ms));
+      continue;
+    }
+
+    esp_peer_video_frame_t vf = {};
+    vf.pts = pts;
+    vf.data = static_cast<uint8_t *>(self->h264_buf_);
+    vf.size = static_cast<int>(outf.length);
+    int vret = 0;
+    if (ops->send_video != nullptr)
+      vret = ops->send_video(handle, &vf);
+    pts += frame_ms;
+    if ((self->video_tx_count_++ % 30) == 0)
+      ESP_LOGI(TAG, "video TX: %u frames (%ux%u, %u bytes, type=%d, ret=%d)",
+               (unsigned) self->video_tx_count_, self->enc_w_, self->enc_h_, (unsigned) outf.length,
+               (int) outf.frame_type, vret);
+
+    uint32_t dt = millis() - t0;
+    if (dt < frame_ms)
+      vTaskDelay(pdMS_TO_TICKS(frame_ms - dt));
+  }
+  self->close_video_encoder_();
+  self->video_task_done_ = true;
+  vTaskDelete(nullptr);
+}
+#endif  // USE_ESP_WEBRTC_VIDEO
+
 void WebRTCComponent::start_audio_bridge_() {
   if (!this->audio_bridge_enabled_() || this->bridge_active_)
     return;
@@ -490,6 +674,19 @@ void WebRTCComponent::start() {
     ESP_LOGI(TAG, "audio bridge ready (mic rate %u Hz -> G.711 8 kHz)", (unsigned) this->audio_rate_);
   }
 
+#ifdef USE_ESP_WEBRTC_VIDEO
+  // 4c) Video bridge: camera RGB565 -> PPA YUV420 -> H.264 -> send_video.
+  if (this->video_bridge_enabled_() && this->video_tx_task_ == nullptr) {
+    this->video_run_ = true;
+    this->video_task_done_ = false;
+    this->video_tx_count_ = 0;
+    xTaskCreatePinnedToCore(video_tx_fn_, "webrtc_vtx", 8192, this, 5,
+                            reinterpret_cast<TaskHandle_t *>(&this->video_tx_task_), 1);
+    ESP_LOGI(TAG, "video bridge ready (camera -> H.264 %ux%u @%ufps)", this->video_w_,
+             this->video_h_, this->video_fps_);
+  }
+#endif
+
   // 5) Open the WebSocket and replay the queued offer (answerer: this feeds the
   // peer's offer, so esp_peer produces the answer via on_msg).
   this->signaling_.connect();
@@ -518,16 +715,20 @@ void WebRTCComponent::stop() {
   // it, or we get a use-after-free. Bounded wait (~600 ms) to avoid hanging.
   const bool had_audio = (this->audio_tx_task_ != nullptr);
   const bool had_peer = (this->task_ != nullptr);
+  const bool had_video = (this->video_tx_task_ != nullptr);
   this->audio_run_ = false;
+  this->video_run_ = false;
   this->run_ = false;
   for (int i = 0; i < 60; i++) {
     bool audio_ok = !had_audio || this->audio_task_done_;
     bool peer_ok = !had_peer || this->peer_task_done_;
-    if (audio_ok && peer_ok)
+    bool video_ok = !had_video || this->video_task_done_;
+    if (audio_ok && peer_ok && video_ok)
       break;
     vTaskDelay(pdMS_TO_TICKS(10));
   }
   this->audio_tx_task_ = nullptr;
+  this->video_tx_task_ = nullptr;
   this->task_ = nullptr;
 
   // 3) Tear down signaling (destroys the WebSocket; join() rebuilds it).
@@ -605,6 +806,9 @@ void WebRTCComponent::dump_config() {
   if (this->audio_bridge_enabled_())
     ESP_LOGCONFIG(TAG, "  Audio bridge: fdaudio mic+speaker, G.711 (rate %u Hz)",
                   (unsigned) this->audio_rate_);
+  if (this->video_bridge_enabled_())
+    ESP_LOGCONFIG(TAG, "  Video bridge: camera -> H.264 (%ux%u @%ufps)", this->video_w_,
+                  this->video_h_, this->video_fps_);
   ESP_LOGCONFIG(TAG, "  Signaling: AppRTC (webrtc.espressif.com)");
 }
 

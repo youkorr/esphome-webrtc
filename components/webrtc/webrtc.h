@@ -22,6 +22,9 @@ class Microphone;
 namespace speaker {
 class Speaker;
 }
+namespace esp_cam_sensor {
+class MipiDSICamComponent;
+}
 
 namespace webrtc {
 
@@ -83,6 +86,10 @@ class WebRTCComponent : public Component {
   void set_speaker(speaker::Speaker *s) { this->spk_ = s; }
   void set_audio_sample_rate(uint32_t r) { this->audio_rate_ = r; }
 
+  // Video bridge: share the esp_cam_sensor camera's RGB565 frames -> PPA YUV420
+  // -> H.264 -> send to the peer. The camera keeps streaming for LVGL.
+  void set_camera(esp_cam_sensor::MipiDSICamComponent *c) { this->camera_ = c; }
+
   void start();
   void stop();
   void send_data(const std::string &data);
@@ -110,12 +117,16 @@ class WebRTCComponent : public Component {
   bool open_peer_();
   static void task_fn_(void *arg);       // runs esp_peer main_loop
   static void audio_tx_fn_(void *arg);   // mic ring -> G.711 -> esp_peer send_audio
+  static void video_tx_fn_(void *arg);   // camera RGB565 -> PPA YUV -> H.264 -> send_video
+  bool open_video_encoder_();            // esp_h264 HW encoder + PPA client
+  void close_video_encoder_();
   // Remote SDP/ICE from signaling -> feed into esp_peer.
   void feed_remote_sdp_(const std::string &sdp);
   void feed_remote_candidate_(const std::string &candidate);
 
   // --- audio bridge helpers ---
   bool audio_bridge_enabled_() const { return this->mic_ != nullptr && this->spk_ != nullptr; }
+  bool video_bridge_enabled_() const { return this->camera_ != nullptr; }
   void start_audio_bridge_();  // (re)start mic+speaker for a call (on connect)
   void stop_audio_bridge_();   // stop mic+speaker (on disconnect)
   void on_mic_data_(const std::vector<uint8_t> &data);  // mic cb -> ring buffer
@@ -154,6 +165,21 @@ class WebRTCComponent : public Component {
   uint32_t audio_rx_count_{0};      // frames received from peer (throttled telemetry)
   // Latched so start_audio_bridge_()/stop_audio_bridge_() run once per edge.
   bool bridge_active_{false};
+
+  // --- video bridge (esp_cam_sensor camera -> H.264 -> peer) ---
+  esp_cam_sensor::MipiDSICamComponent *camera_{nullptr};
+  void *venc_{nullptr};             // esp_h264_enc_handle_t
+  void *ppa_{nullptr};              // ppa_client_handle_t (RGB565 -> YUV420)
+  void *yuv_buf_{nullptr};          // PPA output (YUV420) buffer
+  size_t yuv_buf_size_{0};
+  void *h264_buf_{nullptr};         // encoder output bitstream buffer
+  size_t h264_buf_size_{0};
+  uint16_t enc_w_{0};               // encoder-configured frame size (from first frame)
+  uint16_t enc_h_{0};
+  void *video_tx_task_{nullptr};    // TaskHandle_t
+  volatile bool video_run_{false};
+  volatile bool video_task_done_{true};
+  uint32_t video_tx_count_{0};
 
   void *peer_{nullptr};       // esp_peer_handle_t
   const void *ops_{nullptr};  // const esp_peer_ops_t *
