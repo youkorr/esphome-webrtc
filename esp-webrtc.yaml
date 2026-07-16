@@ -84,7 +84,7 @@ external_components:
       type: git
       url: https://github.com/youkorr/face-toface
       ref: claude/mit-license-face-to-face-p9fc6m #claude/esp32p4-video-communication-W0yEc
-    components: [fdaudio, face2face]
+    components: [fdaudio]
     refresh: 0s   
 
   - source:
@@ -194,19 +194,7 @@ media_player:
       sample_rate: 48000
       num_channels: 1
 
-face2face:
-  id: f2f
-  #peer_ip: ${peer_ip}
-  camera_id: tab5_cam
-  microphone_id: wave_microphone
-  speaker_id: wave_speaker
-  enable_audio: true
-  enable_aec: false           # AEC déjà faite par fdaudio
-  scale: 3
-  jpeg_quality: 35
-  framerate: 10
-  swap_colors: true
-  ring_timeout: 30s
+
       
 esp_video:
   i2c_id: bsp_bus
