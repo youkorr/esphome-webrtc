@@ -483,13 +483,20 @@ bool WebRTCComponent::open_video_encoder_() {
   esp_h264_enc_cfg_hw_t ecfg = {};
   // P4 HW encoder native input format (matches the PPA YUV420 output layout).
   ecfg.pic_type = ESP_H264_RAW_FMT_O_UYY_E_VYY;
-  ecfg.gop = this->video_fps_;
+  // GOP = 4 s: IDR frames are the big bandwidth spikes; the browser asks for a
+  // keyframe via RTCP (nack pli / ccm fir, both offered) when it actually needs
+  // one, so we don't need one every second.
+  uint32_t gop = (uint32_t) this->video_fps_ * 4;
+  ecfg.gop = (uint8_t) (gop > 255 ? 255 : gop);
   ecfg.fps = this->video_fps_;
   ecfg.res.width = this->enc_w_;
   ecfg.res.height = this->enc_h_;
-  ecfg.rc.bitrate = (uint32_t) this->enc_w_ * this->enc_h_ * this->video_fps_ / 20;
-  ecfg.rc.qp_min = 25;
-  ecfg.rc.qp_max = 40;
+  // Keep the uplink modest (the ESP-Hosted C6 Wi-Fi is the bottleneck): target a
+  // low bitrate and allow strong compression (higher qp_max) so frames stay
+  // small instead of ~30 KB.
+  ecfg.rc.bitrate = (uint32_t) this->enc_w_ * this->enc_h_ * this->video_fps_ / 40;
+  ecfg.rc.qp_min = 28;
+  ecfg.rc.qp_max = 51;
   esp_h264_enc_handle_t enc = nullptr;
   esp_h264_err_t herr = esp_h264_enc_hw_new(&ecfg, &enc);
   if (herr != ESP_H264_ERR_OK || enc == nullptr) {
