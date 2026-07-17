@@ -1079,14 +1079,37 @@ void WebRTCComponent::video_rx_fn_(void *arg) {
       }
       self->need_idr_ = false;
     }
+    const uint32_t err_before = dec->decode_errors();
     dec->decode_annexb(au.data, au.size);
     heap_caps_free(au.data);
+    // WebRTC is lossy (UDP): a P-frame with a missing slice makes edge264 decode
+    // against absent references -> garbage, and can even fault. If the decoder
+    // flagged an error, drop this output and re-sync at the next IDR instead of
+    // propagating (and re-referencing) corruption.
+    if (dec->decode_errors() != err_before) {
+      self->need_idr_ = true;
+      if ((self->video_rx_count_ % 30) == 0)
+        ESP_LOGW(TAG, "edge264 decode error -> re-syncing to next IDR");
+      continue;
+    }
 
     h264_hp::DecodedFrame f;
     bool got = false;
     while (dec->get_frame(&f)) {
       const int sw = f.width & ~1;
       const int sh = f.height & ~1;
+      // The browser may send a resolution larger than we sized buffers for.
+      // We crop safely below, but warn once so the mismatch is visible (a much
+      // larger stream also strains PSRAM / decode time).
+      if (sw > W || sh > H) {
+        static bool warned = false;
+        if (!warned) {
+          ESP_LOGW(TAG, "remote H.264 is %dx%d > configured %dx%d — cropped. Set "
+                        "video_width/height to match the sender.",
+                   sw, sh, W, H);
+          warned = true;
+        }
+      }
       if (sw > 0 && sh > 0 && f.y && f.cb && f.cr) {
         const int dw = (sw < W ? sw : W) & ~1;
         const int dh = (sh < H ? sh : H) & ~1;
