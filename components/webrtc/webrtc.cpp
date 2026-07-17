@@ -610,13 +610,12 @@ void WebRTCComponent::audio_tx_fn_(void *arg) {
       continue;
     }
     // Hold this frame until its 20 ms slot; resync if we ever fall far behind.
-    int32_t wait = (int32_t) (pace - millis());
-    if (wait > 0 && wait < 60)
-      vTaskDelay(pdMS_TO_TICKS(wait));
+    int32_t pace_wait = (int32_t) (pace - millis());
+    if (pace_wait > 0 && pace_wait < 60)
+      vTaskDelay(pdMS_TO_TICKS(pace_wait));
     pace += 20;
     if ((int32_t) (millis() - pace) > 100)
       pace = millis();
-    }
 #ifdef USE_ESP_WEBRTC_OPUS
     if (self->audio_codec_ == AUDIO_CODEC_OPUS && self->opus_enc_ != nullptr) {
       // Assumes the mic PCM is already 16 kHz mono (fdaudio sample_rate: 16000).
