@@ -491,12 +491,13 @@ bool WebRTCComponent::open_video_encoder_() {
   ecfg.fps = this->video_fps_;
   ecfg.res.width = this->enc_w_;
   ecfg.res.height = this->enc_h_;
-  // Keep the uplink modest (the ESP-Hosted C6 Wi-Fi is the bottleneck): target a
-  // low bitrate and allow strong compression (higher qp_max) so frames stay
-  // small instead of ~30 KB.
-  ecfg.rc.bitrate = (uint32_t) this->enc_w_ * this->enc_h_ * this->video_fps_ / 40;
-  ecfg.rc.qp_min = 28;
-  ecfg.rc.qp_max = 51;
+  // Balanced quality/bandwidth: send_only already removed the downlink
+  // contention, so we no longer need to over-compress. qp_max=42 keeps quality
+  // decent (qp_max=51 gave ~129-byte garbage frames); a moderate bitrate keeps
+  // the ESP-Hosted C6 uplink happy.
+  ecfg.rc.bitrate = (uint32_t) this->enc_w_ * this->enc_h_ * this->video_fps_ / 10;
+  ecfg.rc.qp_min = 24;
+  ecfg.rc.qp_max = 42;
   esp_h264_enc_handle_t enc = nullptr;
   esp_h264_err_t herr = esp_h264_enc_hw_new(&ecfg, &enc);
   if (herr != ESP_H264_ERR_OK || enc == nullptr) {
