@@ -1,0 +1,548 @@
+substitutions:
+  name: esp-webrtc
+  friendly_name: esp-webrtc
+  background_color: 0x000000
+  text_color: 0xFFFFFF
+  text_color_secondary: 0x767676
+
+
+
+
+
+
+  allowed_characters: " []¿?¡!#%'()+,-—_./:µ³°ªº0123456789ABCDEFGHIJKLMNÑOPQRSTUVWXYZabcdefghijklmnñopqrstuvwxyzáéíóúÁÉÍÓÚäëïöüàâçèêîôùûÀÂÇÈÊÎÔÙÛ"
+  font_glyphsets: "GF_Latin_Core"
+  
+  # for Greek use "Noto Sans" for other languages use a compatible font family
+  font_family: Figtree  
+
+esphome:
+  name: esp-webrtc
+  friendly_name: esp_webrtc
+
+esp32:
+  flash_size: 32MB
+  board: esp32-p4-evboard
+  cpu_frequency: 360MHz
+  engineering_sample: true
+  framework:
+    type: esp-idf
+    advanced:
+      enable_idf_experimental_features: true
+    sdkconfig_options:
+
+      CONFIG_COMPILER_OPTIMIZATION_PERF: y        # perf plutôt que taille
+      #CONFIG_CACHE_L2_CACHE_128KB: y              # + de cache L2
+      CONFIG_SPIRAM_XIP_FROM_PSRAM: y             # soulage le bus flash
+      #CONFIG_LCD_DSI_ISR_IRAM_SAFE: y             # pas de glitch DSI
+      CONFIG_GDMA_ISR_IRAM_SAFE: y    
+      
+      CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM: "y"
+      CONFIG_ESP_TASK_WDT_EN: "10"
+
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "n"
+      CONFIG_SPIRAM_RODATA: "n"
+      CONFIG_ESP32_SPIRAM_SUPPORT: "y"
+      CONFIG_SPIRAM_USE_MALLOC: "y"
+      CONFIG_FATFS_LFN_STACK: "y"
+      CONFIG_LWIP_SO_RCVBUF: "y"
+      CONFIG_LWIP_MAX_SOCKETS: "16"
+      CONFIG_VFS_SUPPORT_IO: "y"
+      CONFIG_VFS_MAX_COUNT: "16" 
+      CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"
+      CONFIG_ESP_TIMER_TASK_STACK_SIZE: "4096"
+      #CONFIG_ESP_TASK_WDT_TIMEOUT_S: "60"
+      CONFIG_ESP_TASK_LOOP_STACK_SIZE: "16384"
+      CONFIG_FATFS_LFN_HEAP: "y"
+      #DCONFIG_USE_AUDIO_AAC_SUPPORT: "y"
+      DCONFIG_ESP_JPG_DECODE_ENABLE: "y"
+      DCONFIG_ESPHOME_ENABLE_PNGLE: "1"
+      CONFIG_SPIRAM_SPEED_200M: "y"  # ← NOUVEAU: 200 MHz au lieu de défaut
+      CONFIG_SPIRAM_SPEED: "200"
+
+      # Buffers WiFi distant (C6) + agrégation AMPDU = gros gain d'efficacité
+      CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM: "16"
+      CONFIG_WIFI_RMT_DYNAMIC_RX_BUFFER_NUM: "64"
+      CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM: "64"
+      CONFIG_WIFI_RMT_AMPDU_TX_ENABLED: "y"
+      CONFIG_WIFI_RMT_TX_BA_WIN: "32"
+      CONFIG_WIFI_RMT_AMPDU_RX_ENABLED: "y"
+      CONFIG_WIFI_RMT_RX_BA_WIN: "32"
+      ## Buffers lwIP (UDP surtout pour toi)
+      CONFIG_LWIP_UDP_RECVMBOX_SIZE: "64"
+      CONFIG_LWIP_TCPIP_RECVMBOX_SIZE: "64"
+      CONFIG_LWIP_TCP_RECVMBOX_SIZE: "64"
+      CONFIG_LWIP_TCP_SND_BUF_DEFAULT: "65534"
+      CONFIG_LWIP_TCP_WND_DEFAULT: "65534"
+      CONFIG_LWIP_TCP_SACK_OUT: "y"    
+logger:
+
+api:
+  encryption:
+    key: "KaRd3AscmpwpYoFJnSnMdQkXK6QxXVGJU7ecLoBolvc="
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: esp_webrtc Fallback Hotspot
+    password: "xfUNyDrVbDpM"
+
+captive_portal:
+
+esp32_hosted:
+  variant: ESP32C6
+  reset_pin: GPIO54
+  cmd_pin: GPIO19
+  clk_pin: GPIO18
+  d0_pin: GPIO14
+  d1_pin: GPIO15
+  d2_pin: GPIO16
+  d3_pin: GPIO17
+  active_high: true
+  use_psram: true
+  slot: 1
+  
+psram:
+  mode: hex
+  speed: 200MHz
+
+external_components:
+
+  - source:
+      type: git
+      url: https://github.com/youkorr/lvgl_9.5
+      ref: claude/jolly-lamport-ERZOC #claude/mit-license-face-to-face-p9fc6m  #lvgl-ppa-msync-fix #claude/jolly-lamport-ERZOC  #6dc5b02f3e6940e782d12fd6748154c0c384272d #claude/jolly-lamport-ERZOC  #claude/fix-lottie-esp32-crash-K7tM1 #claude/fix-lottie-esp32-crashes-8gqrJ #claude/fix-lottie-esp32-crash-vVG5Y #claude/fix-lottie-esp32-crashes-8gqrJ #claude/investigate-pr-conflicts-jyqoy #claude/add-lvgl-example-GJsCN #claude/create-sphere-BVofQ # claude/home-assistant-integration-6apll
+    components: [lvgl, image, font]
+    refresh: 0s     
+  - source:
+      type: git
+      url: https://github.com/youkorr/esphome-webrtc
+      ref: claude/esphome-webrtc-face-toface-9b95pu
+    components: [webrtc]
+    refresh: 0s 
+  # --- face2face (vidéo + audio + appel, tout-en-un) ---
+  - source:
+      type: git
+      url: https://github.com/youkorr/face-toface
+      ref: claude/mit-license-face-to-face-p9fc6m #claude/esp32p4-video-communication-W0yEc
+    components: [fdaudio]
+    refresh: 0s   
+
+  - source:
+      type: git
+      url: https://github.com/youkorr/esphome_esp-video
+      ref: claude/usb-uvc-consumer-integration-gnbflf
+    components: [esp_video, esp_cam_sensor, lvgl_camera_display]
+    refresh: 0s    
+    
+webrtc:
+  id: rtc
+  room_id: "video10"
+  video_codec: h264
+  camera_id: tab5_cam
+  audio_codec: g711a 
+  speaker_id: wave_speaker
+  microphone_id: wave_microphone
+  sample_rate: 16000
+  video_direction: send_only
+  video_width: 640
+  video_height: 480
+  fps: 15
+  auto_start: false
+  ice_servers:
+    - url: "stun:stun.l.google.com:19302"
+    - url: "turn:openrelay.metered.ca:80"
+      username: "openrelayproject"
+      password: "openrelayproject"
+  on_paired:
+    - logger.log: "paired"
+  on_connected:
+    - logger.log: "connected"
+    - logger.log: "Appel connecté 🎙️"      
+
+button:
+  - platform: template
+    name: "Start WebRTC"
+    on_press:
+      - webrtc.start: rtc
+      - switch.turn_on: lvgl_display_enable_switch
+  - platform: template
+    name: "Stop"
+    on_press:
+      - webrtc.stop: rtc
+      - switch.turn_off: lvgl_display_enable_switch
+
+switch:
+  - platform: gpio
+    pin: GPIO53 
+    name: "Audio Amplifier"
+    id: audio_amplifier
+    restore_mode: ALWAYS_ON
+
+  - platform: template
+    name: "LVGL Camera Display"
+    id: lvgl_display_enable_switch
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    turn_on_action:
+      - lambda: |-
+          auto *lvgl_disp = id(camera_display);  
+          if (lvgl_disp != nullptr) {
+            lvgl_disp->set_enabled(true);
+          }
+    turn_off_action:
+      - lambda: |-
+          auto *lvgl_disp = id(camera_display);  
+          if (lvgl_disp != nullptr) {
+            lvgl_disp->set_enabled(false);
+          }
+    
+i2c:
+  - id: bsp_bus
+    sda: GPIO07
+    scl: GPIO08
+    frequency: 400kHz 
+fdaudio:
+  id: audio_engine
+  lrclk_pin: GPIO10
+  bclk_pin: GPIO12
+  mclk_pin: GPIO13
+  din_pin: GPIO11
+  dout_pin: GPIO9
+  i2c_port: 0
+  output_codec: es8311
+  output_address: 0x18
+  mic_address: 0x40
+  mic_gain_db: 24
+  output_volume: 50
+  sample_rate: 16000
+  enable_aec: false           # AEC -> micro nettoyé (rend le barge-in fiable)
+
+microphone:
+  - platform: fdaudio
+    id: wave_microphone
+    fdaudio_id: audio_engine
+
+speaker:
+  - platform: fdaudio
+    id: wave_speaker
+    fdaudio_id: audio_engine
+
+
+        
+media_player:
+  - platform: speaker
+    name: "Habbit Desk PRO"
+    id: speaker_player
+    announcement_pipeline:
+      speaker: wave_speaker
+      format: FLAC
+      sample_rate: 48000
+      num_channels: 1
+
+
+      
+esp_video:
+  i2c_id: bsp_bus
+  xclk_pin: GPIO36
+  xclk_freq: 24000000
+  enable_jpeg: true
+  enable_isp: true
+  use_heap_allocator: false
+
+esp_cam_sensor:
+  id: tab5_cam
+  i2c_id: bsp_bus
+  sensor_type: ov5647        #"sensor_type" au lieu de "sensor"
+  resolution: "800x640"          #"1920x1080"  #"800x800"   #"1280x960"    #"800x640"          # , 1024x600 ,vga
+  framerate: 30
+  jpeg_quality: 15
+  mirror_x: false   # Flip horizontal (hardware)
+  mirror_y: false     # Flip vertical
+  rotation: 0          # 0/90/180/270°
+  crop_offset_x: 0     # Crop pixels from left
+
+lvgl_camera_display:
+  id: camera_display
+  camera_id: tab5_cam
+  canvas_id: camera_canvas
+  update_interval: 33ms 
+
+
+output:
+  - platform: ledc
+    pin: GPIO32
+    id: backlight_pwm
+    frequency: 1000Hz
+    inverted: true
+esp_ldo:
+  - voltage: 2.5V
+    channel: 3
+  - voltage: 2.5V
+    channel: 4   
+font:
+  - file:
+      type: gfonts
+      family: ${font_family}
+      weight: 300
+    id: nunito_24
+    size: 24
+    glyphsets:
+      - ${font_glyphsets}    
+light:
+  - platform: monochromatic
+    output: backlight_pwm
+    name: "Display Backlight"
+    id: backlight
+    restore_mode: RESTORE_DEFAULT_ON
+    default_transition_length: 250ms   
+touchscreen:
+  - platform: gt911
+    id: touch
+    i2c_id: bsp_bus
+    reset_pin: GPIO23
+    update_interval: 8ms   # polling (pas d'interruption)
+    on_touch:
+      - lambda: |-
+          ESP_LOGD("touchscreen", "Touch detected at (%d, %d)", touch.x, touch.y);
+      - light.turn_on: backlight 
+               
+    transform:
+      swap_xy: false
+      mirror_x: true
+      mirror_y: true
+display:
+  - platform: mipi_dsi
+    id: main_display
+    show_test_card: false
+    model: CUSTOM
+    #rotation: 180
+    update_interval: never
+    auto_clear_enabled: false
+    hsync_back_porch: 160
+    lane_bit_rate: 1000Mbps
+    color_order: rgb
+    #pixel_mode: 24
+    lanes: 2
+    reset_pin:
+      number: 33
+    hsync_pulse_width: 70
+    hsync_front_porch: 160
+    vsync_back_porch: 23
+    vsync_pulse_width: 1
+    vsync_front_porch: 12
+    pclk_frequency: 51MHz
+    #framebuffers: 2 
+    dimensions:
+      width: 1024
+      height: 600     
+    init_sequence:   
+      - [0xB2, 0x10]
+      - [0x80, 0x8B]
+      - [0x81, 0x78]
+      - [0x82, 0x84]
+      - [0x83, 0x88]
+      - [0x84, 0xA8]
+      - [0x85, 0xE3]
+      - [0x86, 0x88]
+      - [0x11, 0x00]
+      - delay 120ms
+      - [0x29]
+
+lvgl:
+  use_ppa: true
+  use_ppa_img: true
+  color_depth: 16
+  buffer_size: 100%
+  byte_order: little_endian
+  fps_benchmark: true
+  perf_monitor: true
+  rotation: 180  
+
+  
+  style_definitions:
+
+
+    - id: quick_access_device_1
+      width: 145
+      height: 145
+      bg_color: 0x000000
+      bg_opa: 0%
+      border_color: 0x000000
+      border_opa: 0%
+      border_width: 0
+      align: BOTTOM_RIGHT
+      pad_all: 0
+      translate_x: -595
+      translate_y: -13
+    - id: quick_access_device_2
+      width: 145
+      height: 145
+      bg_color: 0x000000
+      bg_opa: 0%
+      border_color: 0x000000
+      border_opa: 0%
+      border_width: 0
+      align: BOTTOM_RIGHT
+      pad_all: 0
+      translate_x: -445
+      translate_y: -13
+
+  pages:      
+    # ========== PAGE CAMERA ==========
+      - id: camera_page
+        #bg_color: color_slate_blue_gray
+        on_load:
+          - lambda: |-
+              ESP_LOGI("camera", "📷 Page caméra chargée");
+              auto canvas = id(camera_canvas);
+              if (canvas == nullptr) {
+                ESP_LOGE("camera", "Canvas introuvable!");
+                return;
+              }
+              lv_obj_set_size(canvas, 640, 480);
+              lv_obj_set_pos(canvas, 192, 60);  
+              ESP_LOGI("camera", "Canvas: 800x600 @ (192,60)");
+  
+          - lambda: |-
+              // Le label et canvas sont accessibles directement par leur id
+              id(camera_display).set_stats_label(id(camera_stats_label));
+              id(camera_display).configure_canvas(id(camera_canvas));              
+  
+        widgets:
+          # ===== CANVAS CAMERA =====
+          - canvas:
+              id: camera_canvas
+              width: 640
+              height: 480
+              x: 192
+              y: 30
+              bg_color: 0x4682B4
+              border_width: 0
+              radius: 0
+              pad_all: 0
+  
+          # Dans votre page LVGL, ajoutez un label:
+          - label:
+              id: camera_stats_label
+              x: 850
+              y: 550
+              text: "FPS: -- | CPU: --%"
+              text_color: 0xFFFFFF
+  
+  
+          
+          # Bouton START (vert)
+          - button:
+              id: btn_start_streaming
+              width: 80
+              height: 60
+              x: 930
+              y: 150
+              bg_color: 0x00CC44
+              bg_opa: COVER
+              radius: 10
+              on_click:
+                then:
+                  - lambda: |-
+                      ESP_LOGI("camera", "▶ Démarrage streaming");
+                      if (id(tab5_cam).start_streaming()) {
+                        ESP_LOGI("camera", "✓ Streaming démarré");
+                        lv_obj_set_style_bg_color(id(camera_canvas), lv_color_hex(0x000000), 0);
+                      } else {
+                        ESP_LOGE("camera", "✗ Échec streaming");
+                      }
+              widgets:
+                - label:
+                    text: "START"
+                    text_color: 0xFFFFFF
+                    text_font: nunito_24
+                    text_align: CENTER
+                    align: CENTER
+  
+          # Bouton STOP (rouge)
+          - button:
+              id: btn_stop_streaming
+              width: 80
+              height: 60
+              x: 930
+              y: 230
+              bg_color: 0xFF4444
+              bg_opa: COVER
+              radius: 10
+              on_click:
+                then:
+                  - lambda: |-
+                      ESP_LOGI("camera", "■ Arrêt streaming");
+                      id(tab5_cam).stop_streaming();
+                      lv_obj_set_style_bg_color(id(camera_canvas), lv_color_hex(0x4682B4), 0);
+              widgets:
+                - label:
+                    text: "STOP"
+                    text_color: 0xFFFFFF
+                    text_font: nunito_24
+                    text_align: CENTER
+                    align: CENTER
+  
+          # Bouton SNAP (orange)
+          - button:
+              id: btn_take_snapshot
+              width: 80
+              height: 60
+              x: 930
+              y: 310
+              bg_color: 0xFF8800
+              bg_opa: COVER
+              radius: 10
+              on_click:
+                then:
+                  - lambda: |-
+                      ESP_LOGI("camera", "📸 Snapshot");
+                      if (id(tab5_cam).capture_frame()) {
+                        ESP_LOGI("camera", "✓ Frame capturée");
+                      }
+              widgets:
+                - label:
+                    text: "SNAP"
+                    text_color: 0xFFFFFF
+                    text_font: nunito_24
+                    text_align: CENTER
+                    align: CENTER
+  
+          # Bouton BACK (rouge)
+          - button:
+              id: btn_camera_back
+              width: 80
+              height: 60
+              x: 930
+              y: 390
+              bg_color: 0xFF4444
+              bg_opa: COVER
+              radius: 10
+              on_click:
+                then:
+                  - lambda: |-
+                      ESP_LOGI("camera", "Retour accueil");
+                      id(tab5_cam).stop_streaming();
+                  #- lvgl.page.show: page_home
+              widgets:
+                - label:
+                    text: "BACK"
+                    text_color: 0xFFFFFF
+                    text_font: nunito_24
+                    text_align: CENTER
+                    align: CENTER  
+  
+  
+  
+  
+        on_swipe_up:
+          - lambda: 'lv_indev_wait_release(lv_indev_get_act());'
+          #- lvgl.page.show: page_home
+          - light.turn_on: 
+              id: backlight
+              flash_length: 50ms   
