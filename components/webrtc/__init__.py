@@ -202,8 +202,12 @@ async def to_code(config):
         # P4 hardware H.264 encoder. 1.1.x adds ESP_H264_RAW_FMT_RGB565_LE (the
         # P4 HW encoder accepts RGB565 directly); 1.0.4's enum lacked it.
         add_idf_component(name="espressif/esp_h264", ref="~1.1")
-        # Gates the video path (esp_h264 + PPA includes) in webrtc.cpp.
+        # Gates the video path (esp_h264 + PPA + JPEG includes) in webrtc.cpp.
         cg.add_define("USE_ESP_WEBRTC_VIDEO")
+        # P4 hardware Motion-JPEG codec (encode + decode). Used for ESP<->ESP
+        # video ("video_codec: mjpeg"), since the P4 has a HW JPEG decoder but
+        # NO HW H.264 decoder. Built into ESP-IDF (esp_driver_jpeg).
+        include_builtin_idf_component("esp_driver_jpeg")
 
     for srv in config.get(CONF_ICE_SERVERS, []):
         cg.add(

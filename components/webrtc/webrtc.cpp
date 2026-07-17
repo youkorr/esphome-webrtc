@@ -12,7 +12,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/ringbuf.h"
+#include "freertos/semphr.h"
 #include "esp_heap_caps.h"
+
+#include <cstring>
 
 extern "C" {
 #include "esp_peer.h"
@@ -21,10 +24,18 @@ extern "C" {
 
 #ifdef USE_ESP_WEBRTC_VIDEO
 #include "driver/ppa.h"
+#include "esp_cache.h"
 extern "C" {
 #include "esp_h264_enc_single.h"
 #include "esp_h264_enc_single_hw.h"
 }
+// P4 hardware Motion-JPEG codec (encode + decode). RGB565 in / RGB565 out, so
+// the MJPEG path needs no YUV conversion (unlike H.264).
+#include "driver/jpeg_encode.h"
+#include "driver/jpeg_decode.h"
+#ifdef USE_LVGL
+#include "esphome/components/lvgl/lvgl_esphome.h"
+#endif
 #endif
 
 namespace esphome {
@@ -174,9 +185,16 @@ static int peer_on_msg(esp_peer_msg_t *msg, void *ctx) {
 static int peer_on_video_info(esp_peer_video_stream_info_t *info, void *ctx) { return 0; }
 static int peer_on_audio_info(esp_peer_audio_stream_info_t *info, void *ctx) { return 0; }
 
-// Incoming ENCODED frames. Slice 1: audio -> G.711 decode -> fdaudio speaker.
-// Video (Slice 3) -> decode -> LVGL canvas, still a stub here.
-static int peer_on_video_data(esp_peer_video_frame_t *frame, void *ctx) { return 0; }
+// Incoming ENCODED frames. Audio -> G.711 decode -> fdaudio speaker. Video
+// (MJPEG) -> stash the JPEG here; the HW decode + LVGL draw happen in loop().
+static int peer_on_video_data(esp_peer_video_frame_t *frame, void *ctx) {
+#ifdef USE_ESP_WEBRTC_VIDEO
+  if (frame != nullptr && frame->data != nullptr && frame->size > 0) {
+    static_cast<WebRTCComponent *>(ctx)->on_video_frame_(frame->data, frame->size);
+  }
+#endif
+  return 0;
+}
 static int peer_on_audio_data(esp_peer_audio_frame_t *frame, void *ctx) {
   if (frame != nullptr && frame->data != nullptr && frame->size > 0) {
     static_cast<WebRTCComponent *>(ctx)->on_audio_frame_(frame->data, frame->size);
@@ -217,9 +235,12 @@ void WebRTCComponent::send_local_signal_(int msg_type, const uint8_t *data, int 
     // m-line they can't offer Main back and DECLINE the whole track (m=video 0 in
     // the answer -> no remote video). The P4 HW encoder's stream is baseline-
     // compatible, so rewrite the advertised profile to Constrained Baseline
-    // (42e01f); the browser then accepts and decodes it.
-    for (size_t pos = 0; (pos = s.find("4d001f", pos)) != std::string::npos; pos += 6) {
-      s.replace(pos, 6, "42e01f");
+    // (42e01f); the browser then accepts and decodes it. MJPEG carries no
+    // profile-level-id, so only munge the H.264 offer.
+    if (this->video_codec_ == VIDEO_CODEC_H264) {
+      for (size_t pos = 0; (pos = s.find("4d001f", pos)) != std::string::npos; pos += 6) {
+        s.replace(pos, 6, "42e01f");
+      }
     }
     log_sdp_("LOCAL (our offer/answer)", s);
     this->signaling_.send_sdp(s);
@@ -255,6 +276,36 @@ void WebRTCComponent::on_audio_frame_(const uint8_t *data, int size) {
   }
 }
 
+// Peer-task context: copy the newest incoming JPEG frame into a PSRAM stash.
+// The heavy HW decode + LVGL canvas update run in loop() (main task) so they
+// never touch LVGL from this task. If loop() is mid-copy we just drop the frame
+// (another one arrives in ~1 frame period), so the mic/peer task never blocks.
+void WebRTCComponent::on_video_frame_(const uint8_t *data, int size) {
+#ifdef USE_ESP_WEBRTC_VIDEO
+  // Only MJPEG can be HW-decoded on the P4, and only when a canvas is wired up.
+  if (this->video_codec_ != VIDEO_CODEC_MJPEG || this->remote_canvas_ == nullptr ||
+      this->jpeg_rx_mtx_ == nullptr)
+    return;
+  auto mtx = static_cast<SemaphoreHandle_t>(this->jpeg_rx_mtx_);
+  if (xSemaphoreTake(mtx, 0) != pdTRUE)
+    return;  // loop() holds it; skip this frame
+  if ((size_t) size > this->jpeg_rx_cap_) {
+    size_t ncap = (size_t) size + 4096;
+    void *nb = heap_caps_realloc(this->jpeg_rx_buf_, ncap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (nb == nullptr) {
+      xSemaphoreGive(mtx);
+      return;
+    }
+    this->jpeg_rx_buf_ = nb;
+    this->jpeg_rx_cap_ = ncap;
+  }
+  memcpy(this->jpeg_rx_buf_, data, size);
+  this->jpeg_rx_size_ = size;
+  this->jpeg_rx_ready_ = true;
+  xSemaphoreGive(mtx);
+#endif
+}
+
 void WebRTCComponent::feed_remote_sdp_(const std::string &sdp) {
   if (this->peer_ == nullptr) {
     return;
@@ -282,6 +333,14 @@ void WebRTCComponent::feed_remote_candidate_(const std::string &candidate) {
 
 void WebRTCComponent::setup() {
   ESP_LOGCONFIG(TAG, "Setting up WebRTC (esp_peer, room=%s)...", this->room_id_.c_str());
+#ifdef USE_ESP_WEBRTC_VIDEO
+  // MJPEG receive: the peer task stashes JPEG frames guarded by this mutex; the
+  // decode/canvas draw happen in loop(). Created up front so the first frame
+  // that lands before render_remote_frame_() runs is handled safely.
+  if (this->video_codec_ == VIDEO_CODEC_MJPEG && this->jpeg_rx_mtx_ == nullptr) {
+    this->jpeg_rx_mtx_ = xSemaphoreCreateMutex();
+  }
+#endif
 }
 
 bool WebRTCComponent::open_peer_() {
@@ -450,20 +509,58 @@ void WebRTCComponent::on_mic_data_(const std::vector<uint8_t> &data) {
 #ifdef USE_ESP_WEBRTC_VIDEO
 // ---------------------------------------------------------------------------
 // Video: share the camera's RGB565 frames (LVGL keeps its own stream), PPA
-// scale + convert to YUV420 at the negotiated size, H.264-encode on the P4 HW
-// encoder, and send to the peer. Opened lazily once connected (needs the size).
+// scale to the negotiated size, and encode on a P4 HW codec before sending to
+// the peer. Two codecs:
+//   * H.264  (browser interop): PPA -> YUV420 -> HW H.264 encoder.
+//   * MJPEG  (ESP<->ESP): PPA -> RGB565 -> HW JPEG encoder. The P4 has no HW
+//     H.264 DECODER, so a P4 that must SHOW the remote peer uses MJPEG both ways.
+// Opened lazily once connected (needs the negotiated size).
 // ---------------------------------------------------------------------------
 bool WebRTCComponent::open_video_encoder_() {
-  if (this->venc_ != nullptr)
+  const bool mjpeg = (this->video_codec_ == VIDEO_CODEC_MJPEG);
+  if ((mjpeg && this->jenc_ != nullptr) || (!mjpeg && this->venc_ != nullptr))
     return true;
   this->enc_w_ = this->video_w_;
   this->enc_h_ = this->video_h_;
 
   ppa_client_config_t pcfg = {};
   pcfg.oper_type = PPA_OPERATION_SRM;
-  if (ppa_register_client(&pcfg, reinterpret_cast<ppa_client_handle_t *>(&this->ppa_)) != ESP_OK) {
+  if (this->ppa_ == nullptr &&
+      ppa_register_client(&pcfg, reinterpret_cast<ppa_client_handle_t *>(&this->ppa_)) != ESP_OK) {
     ESP_LOGE(TAG, "PPA client register failed");
     return false;
+  }
+
+  if (mjpeg) {
+    // MJPEG: PPA emits RGB565 (scaled) straight into the HW JPEG encoder input,
+    // and the encoder writes the JPEG bitstream. Both buffers must come from
+    // jpeg_alloc_encoder_mem (DMA-capable, correctly aligned for the codec).
+    this->yuv_buf_size_ = (size_t) this->enc_w_ * this->enc_h_ * 2;   // RGB565 in
+    this->h264_buf_size_ = (size_t) this->enc_w_ * this->enc_h_ * 2;  // JPEG out cap
+    jpeg_encode_memory_alloc_cfg_t imcfg = {};
+    imcfg.buffer_direction = JPEG_ENC_ALLOC_INPUT_BUFFER;
+    size_t got_in = 0;
+    this->yuv_buf_ = jpeg_alloc_encoder_mem(this->yuv_buf_size_, &imcfg, &got_in);
+    jpeg_encode_memory_alloc_cfg_t omcfg = {};
+    omcfg.buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER;
+    size_t got_out = 0;
+    this->h264_buf_ = jpeg_alloc_encoder_mem(this->h264_buf_size_, &omcfg, &got_out);
+    if (this->yuv_buf_ == nullptr || this->h264_buf_ == nullptr) {
+      ESP_LOGE(TAG, "JPEG enc buffers alloc failed (in=%u out=%u)",
+               (unsigned) this->yuv_buf_size_, (unsigned) this->h264_buf_size_);
+      return false;
+    }
+    jpeg_encode_engine_cfg_t jcfg = {};
+    jcfg.intr_priority = 0;
+    jcfg.timeout_ms = 1000 / (this->video_fps_ > 0 ? this->video_fps_ : 15) + 20;
+    jpeg_encoder_handle_t je = nullptr;
+    if (jpeg_new_encoder_engine(&jcfg, &je) != ESP_OK || je == nullptr) {
+      ESP_LOGE(TAG, "jpeg_new_encoder_engine failed");
+      return false;
+    }
+    this->jenc_ = je;
+    ESP_LOGI(TAG, "MJPEG encoder ready %ux%u @%ufps", this->enc_w_, this->enc_h_, this->video_fps_);
+    return true;
   }
 
   // The P4 HW encoder rejects planar I420 (different layout) and this esp_h264
@@ -524,6 +621,10 @@ void WebRTCComponent::close_video_encoder_() {
     esp_h264_enc_del(static_cast<esp_h264_enc_handle_t>(this->venc_));
     this->venc_ = nullptr;
   }
+  if (this->jenc_ != nullptr) {
+    jpeg_del_encoder_engine(static_cast<jpeg_encoder_handle_t>(this->jenc_));
+    this->jenc_ = nullptr;
+  }
   if (this->ppa_ != nullptr) {
     ppa_unregister_client(static_cast<ppa_client_handle_t>(this->ppa_));
     this->ppa_ = nullptr;
@@ -543,6 +644,7 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
   const esp_peer_ops_t *ops = static_cast<const esp_peer_ops_t *>(self->ops_);
   auto handle = static_cast<esp_peer_handle_t>(self->peer_);
   auto *cam = self->camera_;
+  const bool mjpeg = (self->video_codec_ == VIDEO_CODEC_MJPEG);
   const uint32_t frame_ms = 1000 / (self->video_fps_ > 0 ? self->video_fps_ : 15);
   uint32_t pts = 0;
 
@@ -555,7 +657,8 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
       vTaskDelay(pdMS_TO_TICKS(50));
       continue;
     }
-    if (self->venc_ == nullptr && !self->open_video_encoder_()) {
+    const bool enc_ready = mjpeg ? (self->jenc_ != nullptr) : (self->venc_ != nullptr);
+    if (!enc_ready && !self->open_video_encoder_()) {
       vTaskDelay(pdMS_TO_TICKS(500));
       continue;
     }
@@ -568,7 +671,9 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
       continue;
     }
 
-    // PPA: RGB565 (w x h) -> YUV420 (enc_w x enc_h), scale + colour convert.
+    // PPA: RGB565 (w x h) -> scale to (enc_w x enc_h). For H.264 also convert to
+    // YUV420 (the encoder's native layout); for MJPEG keep RGB565 (the HW JPEG
+    // encoder takes RGB565 directly).
     ppa_srm_oper_config_t srm = {};
     srm.in.buffer = rgb;
     srm.in.pic_w = w;
@@ -580,7 +685,7 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
     srm.out.buffer_size = self->yuv_buf_size_;
     srm.out.pic_w = self->enc_w_;
     srm.out.pic_h = self->enc_h_;
-    srm.out.srm_cm = PPA_SRM_COLOR_MODE_YUV420;
+    srm.out.srm_cm = mjpeg ? PPA_SRM_COLOR_MODE_RGB565 : PPA_SRM_COLOR_MODE_YUV420;
     srm.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
     srm.scale_x = (float) self->enc_w_ / (float) w;
     srm.scale_y = (float) self->enc_h_ / (float) h;
@@ -594,35 +699,60 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
       continue;
     }
 
-    // Encode YUV420 -> H.264.
-    esp_h264_enc_in_frame_t in = {};
-    in.raw_data.buffer = static_cast<uint8_t *>(self->yuv_buf_);
-    in.raw_data.len = self->yuv_buf_size_;
-    in.pts = pts;
-    esp_h264_enc_out_frame_t outf = {};
-    outf.raw_data.buffer = static_cast<uint8_t *>(self->h264_buf_);
-    outf.raw_data.len = self->h264_buf_size_;
-    esp_h264_err_t er =
-        esp_h264_enc_process(static_cast<esp_h264_enc_handle_t>(self->venc_), &in, &outf);
-    if (er != ESP_H264_ERR_OK) {
-      if ((self->video_tx_count_ % 100) == 0)
-        ESP_LOGW(TAG, "h264 encode failed: %d", (int) er);
-      vTaskDelay(pdMS_TO_TICKS(frame_ms));
-      continue;
+    uint32_t enc_len = 0;
+    int frame_type = 0;
+    if (mjpeg) {
+      // Encode RGB565 -> JPEG on the P4 HW JPEG codec.
+      jpeg_encode_cfg_t jc = {};
+      jc.width = self->enc_w_;
+      jc.height = self->enc_h_;
+      jc.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
+      jc.sub_sample = JPEG_DOWN_SAMPLING_YUV420;
+      jc.image_quality = 60;  // balance quality vs the ESP-Hosted C6 uplink
+      jc.pixel_reverse = false;
+      esp_err_t je = jpeg_encoder_process(
+          static_cast<jpeg_encoder_handle_t>(self->jenc_), &jc,
+          static_cast<uint8_t *>(self->yuv_buf_), self->yuv_buf_size_,
+          static_cast<uint8_t *>(self->h264_buf_), self->h264_buf_size_, &enc_len);
+      if (je != ESP_OK) {
+        if ((self->video_tx_count_ % 100) == 0)
+          ESP_LOGW(TAG, "jpeg encode failed: %s", esp_err_to_name(je));
+        vTaskDelay(pdMS_TO_TICKS(frame_ms));
+        continue;
+      }
+    } else {
+      // Encode YUV420 -> H.264.
+      esp_h264_enc_in_frame_t in = {};
+      in.raw_data.buffer = static_cast<uint8_t *>(self->yuv_buf_);
+      in.raw_data.len = self->yuv_buf_size_;
+      in.pts = pts;
+      esp_h264_enc_out_frame_t outf = {};
+      outf.raw_data.buffer = static_cast<uint8_t *>(self->h264_buf_);
+      outf.raw_data.len = self->h264_buf_size_;
+      esp_h264_err_t er =
+          esp_h264_enc_process(static_cast<esp_h264_enc_handle_t>(self->venc_), &in, &outf);
+      if (er != ESP_H264_ERR_OK) {
+        if ((self->video_tx_count_ % 100) == 0)
+          ESP_LOGW(TAG, "h264 encode failed: %d", (int) er);
+        vTaskDelay(pdMS_TO_TICKS(frame_ms));
+        continue;
+      }
+      enc_len = outf.length;
+      frame_type = (int) outf.frame_type;
     }
 
     esp_peer_video_frame_t vf = {};
     vf.pts = pts;
     vf.data = static_cast<uint8_t *>(self->h264_buf_);
-    vf.size = static_cast<int>(outf.length);
+    vf.size = static_cast<int>(enc_len);
     int vret = 0;
     if (ops->send_video != nullptr)
       vret = ops->send_video(handle, &vf);
     pts += frame_ms;
     if ((self->video_tx_count_++ % 30) == 0)
-      ESP_LOGI(TAG, "video TX: %u frames (%ux%u, %u bytes, type=%d, ret=%d)",
-               (unsigned) self->video_tx_count_, self->enc_w_, self->enc_h_, (unsigned) outf.length,
-               (int) outf.frame_type, vret);
+      ESP_LOGI(TAG, "video TX: %u frames (%s %ux%u, %u bytes, type=%d, ret=%d)",
+               (unsigned) self->video_tx_count_, mjpeg ? "MJPEG" : "H264", self->enc_w_,
+               self->enc_h_, (unsigned) enc_len, frame_type, vret);
 
     uint32_t dt = millis() - t0;
     if (dt < frame_ms)
@@ -631,6 +761,128 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
   self->close_video_encoder_();
   self->video_task_done_ = true;
   vTaskDelete(nullptr);
+}
+
+// Create the HW JPEG decoder + its DMA input/output buffers. Buffers are sized
+// once for the negotiated resolution (a JPEG is always smaller than the RGB565
+// raw of the same size, so the input cap = W*H*2 is safe); frames larger than
+// the negotiated size are dropped. Called lazily from render_remote_frame_().
+bool WebRTCComponent::open_jpeg_decoder_() {
+  if (this->jdec_ != nullptr)
+    return true;
+  jpeg_decode_engine_cfg_t dcfg = {};
+  dcfg.intr_priority = 0;
+  dcfg.timeout_ms = 1000 / (this->video_fps_ > 0 ? this->video_fps_ : 15) + 20;
+  jpeg_decoder_handle_t jd = nullptr;
+  if (jpeg_new_decoder_engine(&dcfg, &jd) != ESP_OK || jd == nullptr) {
+    ESP_LOGE(TAG, "jpeg_new_decoder_engine failed");
+    return false;
+  }
+  this->jdec_ = jd;
+
+  const size_t cap = (size_t) this->video_w_ * this->video_h_ * 2;
+  jpeg_decode_memory_alloc_cfg_t incfg = {};
+  incfg.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER;
+  size_t gi = 0;
+  this->jpeg_dec_in_ = jpeg_alloc_decoder_mem(cap, &incfg, &gi);
+  this->jpeg_dec_in_cap_ = (gi > 0) ? gi : cap;
+  jpeg_decode_memory_alloc_cfg_t outcfg = {};
+  outcfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
+  size_t go = 0;
+  this->remote_rgb_ = jpeg_alloc_decoder_mem(cap, &outcfg, &go);
+  this->remote_rgb_cap_ = (go > 0) ? go : cap;
+  if (this->jpeg_dec_in_ == nullptr || this->remote_rgb_ == nullptr) {
+    ESP_LOGE(TAG, "JPEG dec buffers alloc failed (cap=%u)", (unsigned) cap);
+    return false;
+  }
+#ifdef USE_LVGL
+  if (this->remote_draw_buf_ == nullptr)
+    this->remote_draw_buf_ = new lv_draw_buf_t{};
+#endif
+  ESP_LOGI(TAG, "MJPEG decoder ready (max %ux%u, in cap %u)", this->video_w_, this->video_h_,
+           (unsigned) this->jpeg_dec_in_cap_);
+  return true;
+}
+
+// Main-loop context (same task as LVGL): take the newest stashed JPEG, HW-decode
+// it to RGB565, and hand the buffer to the canvas. Because this runs on the LVGL
+// task and LVGL only reads the canvas later in the same loop iteration, the
+// decode fully completes before any render -> no tearing, no extra buffering.
+void WebRTCComponent::render_remote_frame_() {
+#ifdef USE_LVGL
+  if (this->video_codec_ != VIDEO_CODEC_MJPEG || this->remote_canvas_ == nullptr ||
+      !this->jpeg_rx_ready_ || this->jpeg_rx_mtx_ == nullptr)
+    return;
+  if (this->jdec_ == nullptr && !this->open_jpeg_decoder_())
+    return;
+
+  auto mtx = static_cast<SemaphoreHandle_t>(this->jpeg_rx_mtx_);
+  if (xSemaphoreTake(mtx, 0) != pdTRUE)
+    return;  // peer task is mid-copy; catch it next loop
+  int jsize = this->jpeg_rx_size_;
+  this->jpeg_rx_ready_ = false;
+  bool ok = (jsize > 0 && (size_t) jsize <= this->jpeg_dec_in_cap_);
+  if (ok)
+    memcpy(this->jpeg_dec_in_, this->jpeg_rx_buf_, jsize);
+  xSemaphoreGive(mtx);
+  if (!ok) {
+    if (jsize > 0)
+      ESP_LOGW(TAG, "remote JPEG too big for buffer (%d > %u)", jsize,
+               (unsigned) this->jpeg_dec_in_cap_);
+    return;
+  }
+
+  jpeg_decode_picture_info_t pi = {};
+  if (jpeg_decoder_get_info(static_cast<uint8_t *>(this->jpeg_dec_in_), jsize, &pi) != ESP_OK)
+    return;
+  size_t need = (size_t) pi.width * pi.height * 2;
+  if (need == 0 || need > this->remote_rgb_cap_) {
+    if ((this->video_rx_count_ % 100) == 0)
+      ESP_LOGW(TAG, "remote frame %ux%u exceeds RGB buffer", (unsigned) pi.width,
+               (unsigned) pi.height);
+    return;
+  }
+
+  jpeg_decode_cfg_t dc = {};
+  dc.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
+  dc.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
+  dc.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
+  uint32_t outlen = 0;
+  esp_err_t de = jpeg_decoder_process(static_cast<jpeg_decoder_handle_t>(this->jdec_), &dc,
+                                      static_cast<uint8_t *>(this->jpeg_dec_in_), jsize,
+                                      static_cast<uint8_t *>(this->remote_rgb_),
+                                      this->remote_rgb_cap_, &outlen);
+  if (de != ESP_OK) {
+    if ((this->video_rx_count_ % 100) == 0)
+      ESP_LOGW(TAG, "jpeg decode failed: %s", esp_err_to_name(de));
+    return;
+  }
+  // The decoder DMAs into PSRAM; invalidate the CPU cache so LVGL reads fresh
+  // pixels (same M2C sync the camera->canvas path uses).
+  esp_cache_msync(this->remote_rgb_, need,
+                  ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+
+  auto *canvas = static_cast<lv_obj_t *>(this->remote_canvas_);
+  auto *db = static_cast<lv_draw_buf_t *>(this->remote_draw_buf_);
+  const uint32_t stride = (uint32_t) pi.width * 2;
+  if (!this->remote_draw_buf_init_ || this->rmt_w_ != pi.width || this->rmt_h_ != pi.height) {
+    lv_draw_buf_init(db, pi.width, pi.height, LV_COLOR_FORMAT_RGB565, stride, this->remote_rgb_,
+                     need);
+    lv_draw_buf_set_flag(db, LV_IMAGE_FLAGS_MODIFIABLE);
+    lv_canvas_set_draw_buf(canvas, db);
+    this->remote_draw_buf_init_ = true;
+    this->rmt_w_ = pi.width;
+    this->rmt_h_ = pi.height;
+    ESP_LOGI(TAG, "remote canvas draw_buf %ux%u (stride %u)", (unsigned) pi.width,
+             (unsigned) pi.height, (unsigned) stride);
+  } else {
+    db->data = static_cast<uint8_t *>(this->remote_rgb_);
+  }
+  lv_obj_invalidate(canvas);
+  if ((this->video_rx_count_++ % 30) == 0)
+    ESP_LOGI(TAG, "video RX: %u frames (%ux%u, %d bytes JPEG)", (unsigned) this->video_rx_count_,
+             (unsigned) pi.width, (unsigned) pi.height, jsize);
+#endif  // USE_LVGL
 }
 #endif  // USE_ESP_WEBRTC_VIDEO
 
@@ -751,6 +1003,7 @@ void WebRTCComponent::stop() {
 
   // 1) Stop feeding/rendering audio (also stops the mic pushing into the ring).
   this->connected_ = false;  // the audio TX task stops sending immediately
+  this->jpeg_rx_ready_ = false;  // don't render a stale remote frame after teardown
   this->stop_audio_bridge_();
 
   // 2) Ask both worker tasks to exit and WAIT for them: they dereference the
@@ -811,6 +1064,11 @@ void WebRTCComponent::loop() {
     this->start();
   }
 
+#ifdef USE_ESP_WEBRTC_VIDEO
+  // Decode + draw the remote peer's newest MJPEG frame on the LVGL (main) task.
+  this->render_remote_frame_();
+#endif
+
   uint32_t evs = this->pending_states_.exchange(0u, std::memory_order_acquire);
   if (evs == 0) {
     return;
@@ -849,9 +1107,13 @@ void WebRTCComponent::dump_config() {
   if (this->audio_bridge_enabled_())
     ESP_LOGCONFIG(TAG, "  Audio bridge: fdaudio mic+speaker, G.711 (rate %u Hz)",
                   (unsigned) this->audio_rate_);
-  if (this->video_bridge_enabled_())
-    ESP_LOGCONFIG(TAG, "  Video bridge: camera -> H.264 (%ux%u @%ufps)", this->video_w_,
+  if (this->video_bridge_enabled_()) {
+    const char *vc = (this->video_codec_ == VIDEO_CODEC_MJPEG) ? "MJPEG" : "H.264";
+    ESP_LOGCONFIG(TAG, "  Video bridge: camera -> %s (%ux%u @%ufps)", vc, this->video_w_,
                   this->video_h_, this->video_fps_);
+  }
+  if (this->remote_canvas_ != nullptr)
+    ESP_LOGCONFIG(TAG, "  Remote video: MJPEG -> HW decode -> LVGL canvas");
   ESP_LOGCONFIG(TAG, "  Signaling: AppRTC (webrtc.espressif.com)");
 }
 

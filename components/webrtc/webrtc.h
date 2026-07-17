@@ -90,6 +90,14 @@ class WebRTCComponent : public Component {
   // -> H.264 -> send to the peer. The camera keeps streaming for LVGL.
   void set_camera(esp_cam_sensor::MipiDSICamComponent *c) { this->camera_ = c; }
 
+  // LVGL canvas that displays the REMOTE peer's video. Only meaningful with the
+  // MJPEG codec (the P4 has no HW H.264 decoder, so ESP<->ESP video uses HW
+  // Motion-JPEG). Wire it from a YAML lambda:
+  //   id(webrtc).set_remote_canvas(id(remote_canvas));
+  // Stored as void* so this header stays free of the LVGL headers (lv_obj_t*
+  // converts implicitly to void*).
+  void set_remote_canvas(void *canvas) { this->remote_canvas_ = canvas; }
+
   void start();
   void stop();
   void send_data(const std::string &data);
@@ -112,6 +120,9 @@ class WebRTCComponent : public Component {
   void send_local_signal_(int msg_type, const uint8_t *data, int size);
   // Incoming ENCODED audio frame from esp_peer (peer task) -> decode -> speaker.
   void on_audio_frame_(const uint8_t *data, int size);
+  // Incoming ENCODED video frame (MJPEG) from esp_peer (peer task) -> stash the
+  // JPEG bytes; the HW decode + LVGL canvas draw happen in loop() (main task).
+  void on_video_frame_(const uint8_t *data, int size);
 
  protected:
   bool open_peer_();
@@ -120,6 +131,8 @@ class WebRTCComponent : public Component {
   static void video_tx_fn_(void *arg);   // camera RGB565 -> PPA YUV -> H.264 -> send_video
   bool open_video_encoder_();            // esp_h264 HW encoder + PPA client
   void close_video_encoder_();
+  bool open_jpeg_decoder_();             // HW JPEG decoder + DMA buffers (MJPEG recv)
+  void render_remote_frame_();           // loop(): newest JPEG -> HW decode -> canvas
   // Remote SDP/ICE from signaling -> feed into esp_peer.
   void feed_remote_sdp_(const std::string &sdp);
   void feed_remote_candidate_(const std::string &candidate);
@@ -180,6 +193,31 @@ class WebRTCComponent : public Component {
   volatile bool video_run_{false};
   volatile bool video_task_done_{true};
   uint32_t video_tx_count_{0};
+
+  // --- MJPEG (P4 HW JPEG codec) : ESP<->ESP video, since the P4 has a HW JPEG
+  // encoder AND decoder but NO HW H.264 decoder. When video_codec_ == MJPEG the
+  // send path is camera RGB565 -> PPA (RGB565 downscale) -> HW JPEG encode ->
+  // send_video, and the receive path is on_video_frame_ (JPEG) -> HW JPEG decode
+  // -> RGB565 -> LVGL canvas.
+  void *jenc_{nullptr};             // jpeg_encoder_handle_t (send)
+  void *jdec_{nullptr};             // jpeg_decoder_handle_t (receive)
+  // Peer task -> loop() handoff of the newest incoming JPEG frame (guarded by
+  // jpeg_rx_mtx_; a whole frame is memcpy'd, so the critical sections are short).
+  void *jpeg_rx_buf_{nullptr};      // PSRAM stash of the latest incoming JPEG
+  size_t jpeg_rx_cap_{0};
+  volatile int jpeg_rx_size_{0};
+  volatile bool jpeg_rx_ready_{false};
+  void *jpeg_rx_mtx_{nullptr};      // SemaphoreHandle_t
+  void *jpeg_dec_in_{nullptr};      // DMA-capable decoder input buffer
+  size_t jpeg_dec_in_cap_{0};
+  void *remote_rgb_{nullptr};       // DMA-capable RGB565 decoder output = canvas buffer
+  size_t remote_rgb_cap_{0};
+  uint16_t rmt_w_{0};               // last decoded remote frame size
+  uint16_t rmt_h_{0};
+  uint32_t video_rx_count_{0};
+  void *remote_canvas_{nullptr};    // lv_obj_t* (canvas showing the remote peer)
+  void *remote_draw_buf_{nullptr};  // heap lv_draw_buf_t (kept void* to avoid LVGL in the header)
+  bool remote_draw_buf_init_{false};
 
   void *peer_{nullptr};       // esp_peer_handle_t
   const void *ops_{nullptr};  // const esp_peer_ops_t *
