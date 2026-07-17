@@ -175,7 +175,7 @@ static int peer_on_video_info(esp_peer_video_stream_info_t *info, void *ctx) { r
 static int peer_on_audio_info(esp_peer_audio_stream_info_t *info, void *ctx) { return 0; }
 
 // Incoming ENCODED frames. Slice 1: audio -> G.711 decode -> fdaudio speaker.
-// Video (Slice 3) -> edge264 decode -> LVGL canvas, still a stub here.
+// Video (Slice 3) -> decode -> LVGL canvas, still a stub here.
 static int peer_on_video_data(esp_peer_video_frame_t *frame, void *ctx) { return 0; }
 static int peer_on_audio_data(esp_peer_audio_frame_t *frame, void *ctx) {
   if (frame != nullptr && frame->data != nullptr && frame->size > 0) {
@@ -483,10 +483,13 @@ bool WebRTCComponent::open_video_encoder_() {
   esp_h264_enc_cfg_hw_t ecfg = {};
   // P4 HW encoder native input format (matches the PPA YUV420 output layout).
   ecfg.pic_type = ESP_H264_RAW_FMT_O_UYY_E_VYY;
-  // GOP = 4 s: IDR frames are the big bandwidth spikes; the browser asks for a
-  // keyframe via RTCP (nack pli / ccm fir, both offered) when it actually needs
-  // one, so we don't need one every second.
-  uint32_t gop = (uint32_t) this->video_fps_ * 4;
+  // GOP = 1 s: esp_peer doesn't surface the browser's keyframe requests (PLI/FIR)
+  // to us, so a long GOP means any lost packet freezes the far-end video until
+  // the next IDR. A 1 s IDR interval lets it self-heal quickly ("video stops"
+  // fix). Frames stay modest thanks to send_only + the moderate bitrate.
+  uint32_t gop = (uint32_t) this->video_fps_;
+  if (gop < 1)
+    gop = 1;
   ecfg.gop = (uint8_t) (gop > 255 ? 255 : gop);
   ecfg.fps = this->video_fps_;
   ecfg.res.width = this->enc_w_;
