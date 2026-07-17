@@ -1234,7 +1234,11 @@ void WebRTCComponent::start() {
     this->video_run_ = true;
     this->video_task_done_ = false;
     this->video_tx_count_ = 0;
-    xTaskCreatePinnedToCore(video_tx_fn_, "webrtc_vtx", 8192, this, 5,
+    // Priority 3 (BELOW fdaudio's real-time codec tasks at 5 on this same core):
+    // video is best-effort, audio must never be starved. At equal priority the
+    // H.264 encode round-robins with fdaudio_spk/mic and underruns the I2S TX
+    // ("channel not enabled"); lower priority lets audio always preempt it.
+    xTaskCreatePinnedToCore(video_tx_fn_, "webrtc_vtx", 8192, this, 3,
                             reinterpret_cast<TaskHandle_t *>(&this->video_tx_task_), 1);
     const char *vc = (this->video_codec_ == VIDEO_CODEC_MJPEG) ? "MJPEG" : "H.264";
     ESP_LOGI(TAG, "video bridge ready (camera -> %s %ux%u @%ufps)", vc, this->video_w_,
@@ -1249,7 +1253,9 @@ void WebRTCComponent::start() {
     this->video_rx_run_ = true;
     this->video_rx_task_done_ = false;
     this->video_rx_count_ = 0;
-    xTaskCreatePinnedToCore(video_rx_fn_, "webrtc_vrx", 32768, this, 4,
+    // Priority 3, below fdaudio's core-1 audio tasks (5): the long inline edge264
+    // decode must never hold core 1 against real-time audio.
+    xTaskCreatePinnedToCore(video_rx_fn_, "webrtc_vrx", 32768, this, 3,
                             reinterpret_cast<TaskHandle_t *>(&this->video_rx_task_), 1);
     ESP_LOGI(TAG, "H.264 receive ready (edge264 -> canvas %ux%u)", this->video_w_,
              this->video_h_);
