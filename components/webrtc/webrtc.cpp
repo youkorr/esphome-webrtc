@@ -1354,7 +1354,9 @@ void WebRTCComponent::start() {
   this->peer_task_done_ = false;
   this->audio_tx_count_ = 0;
   this->audio_rx_count_ = 0;
-  xTaskCreatePinnedToCore(task_fn_, "webrtc_peer", 8192, this, 5,
+  // 16 KB: the incoming-audio callback (on_audio_frame_) runs on this task, and
+  // Opus decode needs several KB of stack on top of esp_peer's main_loop.
+  xTaskCreatePinnedToCore(task_fn_, "webrtc_peer", 16384, this, 5,
                           reinterpret_cast<TaskHandle_t *>(&this->task_), 0);
 
   // 4b) Audio bridge: mic ring + callback + G.711/Opus TX task (only if configured).
@@ -1376,7 +1378,10 @@ void WebRTCComponent::start() {
     if (this->mic_rb_ != nullptr && this->audio_tx_task_ == nullptr) {
       this->audio_run_ = true;
       this->audio_task_done_ = false;
-      xTaskCreatePinnedToCore(audio_tx_fn_, "webrtc_atx", 4096, this, 5,
+      // 20 KB: the Opus encoder (esp_audio_enc_process) is stack-heavy (~12 KB);
+      // 4 KB overflowed it (stack protection fault in webrtc_atx). G.711 needs
+      // almost none, but sizing for Opus is harmless.
+      xTaskCreatePinnedToCore(audio_tx_fn_, "webrtc_atx", 20480, this, 5,
                               reinterpret_cast<TaskHandle_t *>(&this->audio_tx_task_), 0);
     }
     ESP_LOGI(TAG, "audio bridge ready (mic rate %u Hz -> G.711 8 kHz)", (unsigned) this->audio_rate_);
