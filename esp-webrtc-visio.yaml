@@ -152,10 +152,14 @@ webrtc:
   # --- Test téléphone / navigateur (par défaut) ---
   video_codec: h264
   audio_codec: g711a
-  video_direction: sendrecv     # send_only = plus stable si edge264 crashe
-  # --- === P4<->P4 === (décommente ces 2 lignes ET commente les 2 du dessus) ---
+  # send_only : on N'AFFICHE PAS la vidéo du navigateur (edge264 sur flux WebRTC
+  # avec pertes = crash). Tu envoies ta caméra au tél + audio 2 sens = STABLE.
+  # Passe à sendrecv UNIQUEMENT en P4<->P4 (MJPEG), pas avec un navigateur.
+  video_direction: send_only
+  # --- === P4<->P4 === (décommente ces 3 lignes ET commente les 3 du dessus) ---
   # video_codec: mjpeg
   # audio_codec: opus
+  # video_direction: sendrecv
   camera_id: tab5_cam
   speaker_id: wave_speaker
   microphone_id: wave_microphone

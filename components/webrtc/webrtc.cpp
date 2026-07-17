@@ -597,11 +597,25 @@ void WebRTCComponent::audio_tx_fn_(void *arg) {
   std::vector<uint8_t> enc(G711_FRAME_SAMPLES);
   std::vector<uint8_t> obuf;  // Opus: raw 16 kHz mono PCM accumulation
   uint32_t pts = 0;
+  // Paced sending: the mic delivers ~96 ms bursts, so the ring often holds
+  // several 20 ms frames at once. Sending them back-to-back produces bursty RTP
+  // that the far end plays with clicks/pops ("le son tape"). Space sends ~20 ms
+  // apart so the RTP stream is smooth.
+  uint32_t pace = millis();
 
   while (self->audio_run_) {
     if (!self->connected_.load() || rb == nullptr) {
       vTaskDelay(pdMS_TO_TICKS(20));
+      pace = millis();
       continue;
+    }
+    // Hold this frame until its 20 ms slot; resync if we ever fall far behind.
+    int32_t wait = (int32_t) (pace - millis());
+    if (wait > 0 && wait < 60)
+      vTaskDelay(pdMS_TO_TICKS(wait));
+    pace += 20;
+    if ((int32_t) (millis() - pace) > 100)
+      pace = millis();
     }
 #ifdef USE_ESP_WEBRTC_OPUS
     if (self->audio_codec_ == AUDIO_CODEC_OPUS && self->opus_enc_ != nullptr) {
