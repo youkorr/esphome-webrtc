@@ -674,10 +674,16 @@ void WebRTCComponent::audio_tx_fn_(void *arg) {
     if (src.empty())
       continue;  // no mic data yet
 
-    // Decimate to 8 kHz and encode one G.711 byte per output sample.
+    // Decimate to 8 kHz and encode one G.711 byte per output sample. Average the
+    // `decim` input samples instead of dropping (a cheap anti-alias box filter):
+    // plain sample-dropping folds the 4-8 kHz band back into the audible range
+    // and makes speech sound harsh/"saturated". Averaging attenuates it.
     int out = 0;
     for (int i = 0; i + decim <= (int) src.size() && out < G711_FRAME_SAMPLES; i += decim) {
-      int16_t s = src[i];
+      int32_t acc = 0;
+      for (int k = 0; k < decim; k++)
+        acc += src[i + k];
+      int16_t s = (int16_t) (acc / decim);
       enc[out++] = (self->audio_codec_ == AUDIO_CODEC_G711U) ? linear_to_ulaw(s)
                                                              : linear_to_alaw(s);
     }
