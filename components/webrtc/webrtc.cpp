@@ -23,6 +23,15 @@ extern "C" {
 #include "esp_peer_default.h"
 }
 
+#ifdef USE_ESP_WEBRTC_OPUS
+extern "C" {
+#include "esp_audio_enc.h"
+#include "esp_opus_enc.h"
+#include "esp_audio_dec.h"
+#include "esp_opus_dec.h"
+}
+#endif
+
 #ifdef USE_ESP_WEBRTC_VIDEO
 #include "driver/ppa.h"
 #include "esp_cache.h"
@@ -53,6 +62,8 @@ static const char *const TAG = "webrtc";
 // G.711 telephony is always 8 kHz mono; a 20 ms frame is 160 samples.
 static constexpr uint32_t G711_RATE = 8000;
 static constexpr int G711_FRAME_SAMPLES = 160;  // 20 ms @ 8 kHz
+// Opus here runs 16 kHz mono (wideband voice), 20 ms frames.
+static constexpr uint32_t OPUS_RATE = 16000;
 
 // ---------------------------------------------------------------------------
 // G.711 A-law / u-law (ITU-T reference, Sun Microsystems public-domain impl).
@@ -261,6 +272,27 @@ void WebRTCComponent::send_local_signal_(int msg_type, const uint8_t *data, int 
 void WebRTCComponent::on_audio_frame_(const uint8_t *data, int size) {
   if (this->spk_ == nullptr || size <= 0)
     return;
+#ifdef USE_ESP_WEBRTC_OPUS
+  if (this->audio_codec_ == AUDIO_CODEC_OPUS && this->opus_dec_ != nullptr &&
+      this->opus_pcm_out_ != nullptr) {
+    esp_audio_dec_in_raw_t raw = {};
+    raw.buffer = const_cast<uint8_t *>(data);
+    raw.len = (uint32_t) size;
+    esp_audio_dec_out_frame_t out = {};
+    out.buffer = static_cast<uint8_t *>(this->opus_pcm_out_);
+    out.len = (uint32_t) this->opus_pcm_out_cap_;
+    int dr = esp_audio_dec_process(static_cast<esp_audio_dec_handle_t>(this->opus_dec_), &raw, &out);
+    if (dr == ESP_AUDIO_ERR_OK && out.decoded_size > 0) {
+      this->spk_->play(static_cast<const uint8_t *>(this->opus_pcm_out_), out.decoded_size);
+      if ((this->audio_rx_count_++ % 100) == 0)
+        ESP_LOGI(TAG, "audio RX: %u frames (Opus %d bytes -> %u PCM)",
+                 (unsigned) this->audio_rx_count_, size, (unsigned) out.decoded_size);
+    } else if ((this->audio_rx_count_ % 100) == 0) {
+      ESP_LOGW(TAG, "Opus decode failed: %d", dr);
+    }
+    return;
+  }
+#endif
   std::vector<int16_t> pcm(size);
   if (this->audio_codec_ == AUDIO_CODEC_G711U) {
     for (int i = 0; i < size; i++)
@@ -484,10 +516,73 @@ void WebRTCComponent::task_fn_(void *arg) {
   vTaskDelete(nullptr);
 }
 
+#ifdef USE_ESP_WEBRTC_OPUS
+// Create the Opus encoder + decoder (esp_audio_codec) once. 16 kHz mono, 20 ms,
+// VOIP mode. The encoder input frame is a fixed byte count (opus_in_bytes_).
+bool WebRTCComponent::open_opus_() {
+  if (this->opus_enc_ != nullptr && this->opus_dec_ != nullptr)
+    return true;
+  // Registration is idempotent across calls (ALREADY_EXIST is fine).
+  esp_opus_enc_register();
+  esp_opus_dec_register();
+
+  esp_opus_enc_config_t ecfg = ESP_OPUS_ENC_CONFIG_DEFAULT();
+  ecfg.sample_rate = OPUS_RATE;
+  ecfg.channel = 1;
+  ecfg.bits_per_sample = 16;
+  ecfg.bitrate = 24000;  // wideband voice
+  ecfg.frame_duration = ESP_OPUS_ENC_FRAME_DURATION_20_MS;
+  ecfg.application_mode = ESP_OPUS_ENC_APPLICATION_VOIP;
+  ecfg.complexity = 5;
+  esp_audio_enc_config_t enc_cfg = {};
+  enc_cfg.type = ESP_AUDIO_TYPE_OPUS;
+  enc_cfg.cfg = &ecfg;
+  enc_cfg.cfg_sz = sizeof(ecfg);
+  esp_audio_enc_handle_t enc = nullptr;
+  if (esp_audio_enc_open(&enc_cfg, &enc) != ESP_AUDIO_ERR_OK || enc == nullptr) {
+    ESP_LOGE(TAG, "Opus encoder open failed");
+    return false;
+  }
+  int in_size = 0, out_size = 0;
+  esp_audio_enc_get_frame_size(enc, &in_size, &out_size);
+  if (in_size <= 0)
+    in_size = (int) (OPUS_RATE / 50) * 2;  // 20 ms @ 16 kHz mono, 16-bit
+  this->opus_enc_ = enc;
+  this->opus_in_bytes_ = in_size;
+  this->opus_enc_out_cap_ = (out_size > 0) ? (size_t) out_size : 1500;
+  this->opus_enc_out_ = heap_caps_malloc(this->opus_enc_out_cap_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+  esp_opus_dec_cfg_t dcfg = ESP_OPUS_DEC_CONFIG_DEFAULT();
+  dcfg.sample_rate = OPUS_RATE;
+  dcfg.channel = 1;
+  dcfg.frame_duration = ESP_OPUS_DEC_FRAME_DURATION_INVALID;  // auto-detect per packet
+  dcfg.self_delimited = false;
+  esp_audio_dec_cfg_t dec_cfg = {};
+  dec_cfg.type = ESP_AUDIO_TYPE_OPUS;
+  dec_cfg.cfg = &dcfg;
+  dec_cfg.cfg_sz = sizeof(dcfg);
+  esp_audio_dec_handle_t dec = nullptr;
+  if (esp_audio_dec_open(&dec_cfg, &dec) != ESP_AUDIO_ERR_OK || dec == nullptr) {
+    ESP_LOGE(TAG, "Opus decoder open failed");
+    return false;
+  }
+  this->opus_dec_ = dec;
+  this->opus_pcm_out_cap_ = 4096;  // up to a 120 ms frame of 16 kHz mono PCM
+  this->opus_pcm_out_ = heap_caps_malloc(this->opus_pcm_out_cap_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (this->opus_enc_out_ == nullptr || this->opus_pcm_out_ == nullptr) {
+    ESP_LOGE(TAG, "Opus buffers alloc failed");
+    return false;
+  }
+  ESP_LOGI(TAG, "Opus ready (16 kHz mono, 20 ms, in=%d out cap=%u)", this->opus_in_bytes_,
+           (unsigned) this->opus_enc_out_cap_);
+  return true;
+}
+#endif  // USE_ESP_WEBRTC_OPUS
+
 // ---------------------------------------------------------------------------
-// Audio TX task: drain the mic ring, decimate mic_rate -> 8 kHz, G.711-encode a
-// 20 ms frame, and hand it to esp_peer. Runs whenever a call is connected; idle
-// (blocks on the empty ring) otherwise.
+// Audio TX task: drain the mic ring, and either G.711-encode (decimate to 8 kHz)
+// or Opus-encode (16 kHz) a 20 ms frame, then hand it to esp_peer. Runs whenever
+// a call is connected; idle (blocks on the empty ring) otherwise.
 // ---------------------------------------------------------------------------
 void WebRTCComponent::audio_tx_fn_(void *arg) {
   auto *self = static_cast<WebRTCComponent *>(arg);
@@ -500,6 +595,7 @@ void WebRTCComponent::audio_tx_fn_(void *arg) {
   std::vector<int16_t> src;
   src.reserve(need_src);
   std::vector<uint8_t> enc(G711_FRAME_SAMPLES);
+  std::vector<uint8_t> obuf;  // Opus: raw 16 kHz mono PCM accumulation
   uint32_t pts = 0;
 
   while (self->audio_run_) {
@@ -507,6 +603,57 @@ void WebRTCComponent::audio_tx_fn_(void *arg) {
       vTaskDelay(pdMS_TO_TICKS(20));
       continue;
     }
+#ifdef USE_ESP_WEBRTC_OPUS
+    if (self->audio_codec_ == AUDIO_CODEC_OPUS && self->opus_enc_ != nullptr) {
+      // Assumes the mic PCM is already 16 kHz mono (fdaudio sample_rate: 16000).
+      const size_t need = (size_t) self->opus_in_bytes_;
+      obuf.clear();
+      while (obuf.size() < need && self->audio_run_) {
+        size_t got = 0;
+        TickType_t wait = obuf.empty() ? pdMS_TO_TICKS(40) : pdMS_TO_TICKS(5);
+        void *item = xRingbufferReceiveUpTo(rb, &got, wait, need - obuf.size());
+        if (item == nullptr)
+          break;
+        const uint8_t *b = static_cast<const uint8_t *>(item);
+        obuf.insert(obuf.end(), b, b + got);
+        vRingbufferReturnItem(rb, item);
+      }
+      if (obuf.size() < need)
+        continue;  // wait for a full 20 ms frame
+      esp_audio_enc_in_frame_t inf = {};
+      inf.buffer = obuf.data();
+      inf.len = (uint32_t) need;
+      esp_audio_enc_out_frame_t of = {};
+      of.buffer = static_cast<uint8_t *>(self->opus_enc_out_);
+      of.len = (uint32_t) self->opus_enc_out_cap_;
+      int er = esp_audio_enc_process(static_cast<esp_audio_enc_handle_t>(self->opus_enc_), &inf, &of);
+      if (er == ESP_AUDIO_ERR_OK && of.encoded_bytes > 0) {
+        esp_peer_audio_frame_t frame = {};
+        frame.pts = pts;
+        frame.data = static_cast<uint8_t *>(self->opus_enc_out_);
+        frame.size = (int) of.encoded_bytes;
+        int tx_ret = 0;
+        if (ops->send_audio != nullptr)
+          tx_ret = ops->send_audio(handle, &frame);
+        pts += 20;
+        if ((self->audio_tx_count_++ % 100) == 0) {
+          int16_t peak = 0;
+          const int16_t *s16 = reinterpret_cast<const int16_t *>(obuf.data());
+          for (size_t i = 0; i < need / 2; i++) {
+            int16_t a = s16[i] < 0 ? -s16[i] : s16[i];
+            if (a > peak)
+              peak = a;
+          }
+          ESP_LOGI(TAG, "audio TX: %u frames (Opus %u bytes, mic peak=%d, ret=%d)",
+                   (unsigned) self->audio_tx_count_, (unsigned) of.encoded_bytes, (int) peak,
+                   tx_ret);
+        }
+      } else if ((self->audio_tx_count_ % 100) == 0) {
+        ESP_LOGW(TAG, "Opus encode failed: %d", er);
+      }
+      continue;
+    }
+#endif
     // Collect one 20 ms worth of mic PCM (bytes).
     size_t need_bytes = (size_t) need_src * sizeof(int16_t);
     src.clear();
@@ -1148,9 +1295,12 @@ void WebRTCComponent::video_rx_fn_(void *arg) {
 void WebRTCComponent::start_audio_bridge_() {
   if (!this->audio_bridge_enabled_() || this->bridge_active_)
     return;
-  ESP_LOGI(TAG, "audio bridge: starting mic+speaker (G.711 @ 8 kHz)");
-  // Speaker plays decoded 8 kHz mono PCM16.
-  this->spk_->set_audio_stream_info(audio::AudioStreamInfo(16, 1, G711_RATE));
+  const bool opus = (this->audio_codec_ == AUDIO_CODEC_OPUS);
+  const uint32_t spk_rate = opus ? OPUS_RATE : G711_RATE;
+  ESP_LOGI(TAG, "audio bridge: starting mic+speaker (%s @ %u Hz)", opus ? "Opus" : "G.711",
+           (unsigned) spk_rate);
+  // Speaker plays decoded mono PCM16 at the codec's rate.
+  this->spk_->set_audio_stream_info(audio::AudioStreamInfo(16, 1, spk_rate));
   this->spk_->start();
   if (!this->mic_->is_running()) {
     this->mic_->start();
@@ -1207,8 +1357,12 @@ void WebRTCComponent::start() {
   xTaskCreatePinnedToCore(task_fn_, "webrtc_peer", 8192, this, 5,
                           reinterpret_cast<TaskHandle_t *>(&this->task_), 0);
 
-  // 4b) Audio bridge: mic ring + callback + G.711 TX task (only if configured).
+  // 4b) Audio bridge: mic ring + callback + G.711/Opus TX task (only if configured).
   if (this->audio_bridge_enabled_()) {
+#ifdef USE_ESP_WEBRTC_OPUS
+    if (this->audio_codec_ == AUDIO_CODEC_OPUS && !this->open_opus_())
+      ESP_LOGE(TAG, "Opus init failed; audio TX/RX will be silent");
+#endif
     if (this->mic_rb_ == nullptr) {
       this->mic_rb_ = xRingbufferCreate(16 * 1024, RINGBUF_TYPE_BYTEBUF);
       if (this->mic_rb_ == nullptr)
@@ -1400,9 +1554,13 @@ void WebRTCComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Data channel: %s", YESNO(this->enable_data_channel_));
   ESP_LOGCONFIG(TAG, "  Auto start: %s", YESNO(this->auto_start_));
   ESP_LOGCONFIG(TAG, "  ICE servers: %u", (unsigned) this->ice_servers_.size());
-  if (this->audio_bridge_enabled_())
-    ESP_LOGCONFIG(TAG, "  Audio bridge: fdaudio mic+speaker, G.711 (rate %u Hz)",
+  if (this->audio_bridge_enabled_()) {
+    const char *ac = (this->audio_codec_ == AUDIO_CODEC_OPUS)    ? "Opus 16 kHz"
+                     : (this->audio_codec_ == AUDIO_CODEC_G711U) ? "G.711u"
+                                                                 : "G.711a";
+    ESP_LOGCONFIG(TAG, "  Audio bridge: fdaudio mic+speaker, %s (mic rate %u Hz)", ac,
                   (unsigned) this->audio_rate_);
+  }
   if (this->video_bridge_enabled_()) {
     const char *vc = (this->video_codec_ == VIDEO_CODEC_MJPEG) ? "MJPEG" : "H.264";
     ESP_LOGCONFIG(TAG, "  Video bridge: camera -> %s (%ux%u @%ufps)", vc, this->video_w_,

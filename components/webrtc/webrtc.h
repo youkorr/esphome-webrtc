@@ -127,7 +127,8 @@ class WebRTCComponent : public Component {
  protected:
   bool open_peer_();
   static void task_fn_(void *arg);       // runs esp_peer main_loop
-  static void audio_tx_fn_(void *arg);   // mic ring -> G.711 -> esp_peer send_audio
+  static void audio_tx_fn_(void *arg);   // mic ring -> G.711/Opus -> esp_peer send_audio
+  bool open_opus_();                     // esp_audio_codec Opus encoder + decoder
   static void video_tx_fn_(void *arg);   // camera RGB565 -> PPA YUV -> H.264 -> send_video
   bool open_video_encoder_();            // esp_h264 HW encoder + PPA client
   void close_video_encoder_();
@@ -181,6 +182,18 @@ class WebRTCComponent : public Component {
   uint32_t audio_rx_count_{0};      // frames received from peer (throttled telemetry)
   // Latched so start_audio_bridge_()/stop_audio_bridge_() run once per edge.
   bool bridge_active_{false};
+
+  // --- Opus audio codec (esp_audio_codec), optional & opt-in via
+  // audio_codec: opus. Higher quality than G.711 (16 kHz wideband vs 8 kHz
+  // telephony) and what Espressif uses. esp_peer only transports, so we encode
+  // /decode here exactly like G.711. Handles kept void* to keep the header light.
+  void *opus_enc_{nullptr};      // esp_audio_enc_handle_t
+  void *opus_dec_{nullptr};      // esp_audio_dec_handle_t
+  int opus_in_bytes_{640};       // encoder input frame size (16 kHz mono 20 ms)
+  void *opus_enc_out_{nullptr};  // encoded-Opus output buffer
+  size_t opus_enc_out_cap_{0};
+  void *opus_pcm_out_{nullptr};  // decoded-PCM output buffer
+  size_t opus_pcm_out_cap_{0};
 
   // --- video bridge (esp_cam_sensor camera -> H.264 -> peer) ---
   esp_cam_sensor::MipiDSICamComponent *camera_{nullptr};

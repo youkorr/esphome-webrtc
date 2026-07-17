@@ -195,6 +195,12 @@ async def to_code(config):
         cg.add(var.set_microphone(mic))
         cg.add(var.set_speaker(spk))
         cg.add(var.set_audio_sample_rate(config[CONF_SAMPLE_RATE]))
+        # Opus codec (esp_audio_codec) for higher-quality audio than G.711.
+        # Compiled in whenever the audio bridge is used; selected at runtime by
+        # audio_codec: opus (G.711 stays the default). esp_peer only transports,
+        # so the actual Opus encode/decode lives in webrtc.cpp.
+        add_idf_component(name="espressif/esp_audio_codec", ref=">=2.0.0")
+        cg.add_define("USE_ESP_WEBRTC_OPUS")
 
     if CONF_CAMERA_ID in config:
         cam = await cg.get_variable(config[CONF_CAMERA_ID])
