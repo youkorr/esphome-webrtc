@@ -13,6 +13,7 @@
 #include "freertos/task.h"
 #include "freertos/ringbuf.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"
 #include "esp_heap_caps.h"
 
 #include <cstring>
@@ -35,6 +36,12 @@ extern "C" {
 #include "driver/jpeg_decode.h"
 #ifdef USE_LVGL
 #include "esphome/components/lvgl/lvgl_esphome.h"
+#endif
+// edge264 High-profile software H.264 decoder (from the h264_hp component in the
+// ip-camera-viewer repo). Only present when that lib is in the build; the flag
+// -DUSE_H264_HP_EDGE264 is a global build flag set by h264_hp.
+#ifdef USE_H264_HP_EDGE264
+#include "esphome/components/h264_hp/h264_hp_decoder.h"
 #endif
 #endif
 
@@ -278,31 +285,80 @@ void WebRTCComponent::on_audio_frame_(const uint8_t *data, int size) {
 
 // Peer-task context: copy the newest incoming JPEG frame into a PSRAM stash.
 // The heavy HW decode + LVGL canvas update run in loop() (main task) so they
-// never touch LVGL from this task. If loop() is mid-copy we just drop the frame
-// (another one arrives in ~1 frame period), so the mic/peer task never blocks.
+// never touch LVGL from this task. MJPEG frames are independent so newest wins
+// (drop under contention); H.264 is inter-frame coded so its access units go
+// through an ORDERED bounded queue drained by the edge264 decode task.
+#ifdef USE_ESP_WEBRTC_VIDEO
+// One encoded H.264 access unit queued from the peer task to the decode task.
+struct WebRtcAu {
+  uint8_t *data;
+  int size;
+  bool idr;
+};
+
+// True if the Annex-B buffer contains an IDR slice (NAL type 5). Used to re-sync
+// after a queue overflow: we drop everything until the next IDR.
+static bool annexb_has_idr_(const uint8_t *d, int n) {
+  for (int i = 0; i + 3 < n; i++) {
+    if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1) {
+      if ((d[i + 3] & 0x1F) == 5)
+        return true;
+      i += 2;
+    }
+  }
+  return false;
+}
+#endif
+
 void WebRTCComponent::on_video_frame_(const uint8_t *data, int size) {
 #ifdef USE_ESP_WEBRTC_VIDEO
-  // Only MJPEG can be HW-decoded on the P4, and only when a canvas is wired up.
-  if (this->video_codec_ != VIDEO_CODEC_MJPEG || this->remote_canvas_ == nullptr ||
-      this->jpeg_rx_mtx_ == nullptr)
+  if (this->remote_canvas_ == nullptr)
     return;
-  auto mtx = static_cast<SemaphoreHandle_t>(this->jpeg_rx_mtx_);
-  if (xSemaphoreTake(mtx, 0) != pdTRUE)
-    return;  // loop() holds it; skip this frame
-  if ((size_t) size > this->jpeg_rx_cap_) {
-    size_t ncap = (size_t) size + 4096;
-    void *nb = heap_caps_realloc(this->jpeg_rx_buf_, ncap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (nb == nullptr) {
-      xSemaphoreGive(mtx);
+
+  if (this->video_codec_ == VIDEO_CODEC_MJPEG) {
+    // MJPEG: independent frames -> newest-wins stash consumed by loop().
+    if (this->jpeg_rx_mtx_ == nullptr)
       return;
+    auto mtx = static_cast<SemaphoreHandle_t>(this->jpeg_rx_mtx_);
+    if (xSemaphoreTake(mtx, 0) != pdTRUE)
+      return;  // loop() holds it; skip this frame
+    if ((size_t) size > this->jpeg_rx_cap_) {
+      size_t ncap = (size_t) size + 4096;
+      void *nb = heap_caps_realloc(this->jpeg_rx_buf_, ncap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      if (nb == nullptr) {
+        xSemaphoreGive(mtx);
+        return;
+      }
+      this->jpeg_rx_buf_ = nb;
+      this->jpeg_rx_cap_ = ncap;
     }
-    this->jpeg_rx_buf_ = nb;
-    this->jpeg_rx_cap_ = ncap;
+    memcpy(this->jpeg_rx_buf_, data, size);
+    this->jpeg_rx_size_ = size;
+    this->jpeg_rx_ready_ = true;
+    xSemaphoreGive(mtx);
+    return;
   }
-  memcpy(this->jpeg_rx_buf_, data, size);
-  this->jpeg_rx_size_ = size;
-  this->jpeg_rx_ready_ = true;
-  xSemaphoreGive(mtx);
+
+  // H.264: enqueue a heap copy of the access unit for the edge264 decode task.
+  auto q = static_cast<QueueHandle_t>(this->video_q_);
+  if (q == nullptr)
+    return;
+  auto *buf = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (buf == nullptr)
+    return;
+  memcpy(buf, data, size);
+  WebRtcAu au{buf, size, annexb_has_idr_(data, size)};
+  if (xQueueSend(q, &au, 0) != pdTRUE) {
+    // Queue full: the decoder can't keep up. Drop the OLDEST to bound memory and
+    // ask the decoder to re-sync at the next IDR (dropping a P-frame otherwise
+    // corrupts everything up to it). Keeps latency bounded to ~1 GOP.
+    WebRtcAu old;
+    if (xQueueReceive(q, &old, 0) == pdTRUE)
+      heap_caps_free(old.data);
+    this->need_idr_ = true;
+    if (xQueueSend(q, &au, 0) != pdTRUE)
+      heap_caps_free(buf);
+  }
 #endif
 }
 
@@ -340,6 +396,13 @@ void WebRTCComponent::setup() {
   if (this->video_codec_ == VIDEO_CODEC_MJPEG && this->jpeg_rx_mtx_ == nullptr) {
     this->jpeg_rx_mtx_ = xSemaphoreCreateMutex();
   }
+#ifdef USE_H264_HP_EDGE264
+  // H.264 receive: ordered access-unit queue from the peer task to the edge264
+  // decode task. Created up front so early frames are queued safely.
+  if (this->video_codec_ == VIDEO_CODEC_H264 && this->video_q_ == nullptr) {
+    this->video_q_ = xQueueCreate(30, sizeof(WebRtcAu));
+  }
+#endif
 #endif
 }
 
@@ -709,7 +772,6 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
       jc.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
       jc.sub_sample = JPEG_DOWN_SAMPLING_YUV420;
       jc.image_quality = 60;  // balance quality vs the ESP-Hosted C6 uplink
-      jc.pixel_reverse = false;
       esp_err_t je = jpeg_encoder_process(
           static_cast<jpeg_encoder_handle_t>(self->jenc_), &jc,
           static_cast<uint8_t *>(self->yuv_buf_), self->yuv_buf_size_,
@@ -810,8 +872,31 @@ bool WebRTCComponent::open_jpeg_decoder_() {
 // decode fully completes before any render -> no tearing, no extra buffering.
 void WebRTCComponent::render_remote_frame_() {
 #ifdef USE_LVGL
-  if (this->video_codec_ != VIDEO_CODEC_MJPEG || this->remote_canvas_ == nullptr ||
-      !this->jpeg_rx_ready_ || this->jpeg_rx_mtx_ == nullptr)
+  if (this->remote_canvas_ == nullptr)
+    return;
+
+  // H.264 (edge264): the decode task already produced an RGB565 frame; here we
+  // only swap it onto the canvas. Double-buffered so the task fills one buffer
+  // while LVGL shows the other.
+  if (this->video_codec_ == VIDEO_CODEC_H264) {
+    if (!this->rgb_ready_.load(std::memory_order_acquire))
+      return;
+    uint8_t *tmp = this->rgb_display_;
+    this->rgb_display_ = this->rgb_decode_;
+    this->rgb_decode_ = tmp;
+    this->rgb_ready_.store(false, std::memory_order_release);
+    auto *canvas = static_cast<lv_obj_t *>(this->remote_canvas_);
+    lv_canvas_set_buffer(canvas, this->rgb_display_, this->video_w_, this->video_h_,
+                         LV_COLOR_FORMAT_RGB565);
+    lv_obj_invalidate(canvas);
+    if ((this->video_rx_count_++ % 30) == 0)
+      ESP_LOGI(TAG, "video RX: %u frames (edge264 %ux%u)", (unsigned) this->video_rx_count_,
+               this->video_w_, this->video_h_);
+    return;
+  }
+
+  if (this->video_codec_ != VIDEO_CODEC_MJPEG || !this->jpeg_rx_ready_ ||
+      this->jpeg_rx_mtx_ == nullptr)
     return;
   if (this->jdec_ == nullptr && !this->open_jpeg_decoder_())
     return;
@@ -884,6 +969,157 @@ void WebRTCComponent::render_remote_frame_() {
              (unsigned) pi.width, (unsigned) pi.height, jsize);
 #endif  // USE_LVGL
 }
+
+// I420 (contiguous, width*height + 2*(w/2*h/2)) -> RGB565. Ported verbatim from
+// ip_camera_viewer (scalar BT.601, 2x2 block). Runs on the decode task.
+void WebRTCComponent::convert_yuv420_to_rgb565_(uint8_t *yuv, uint8_t *rgb565, int width,
+                                                int height) {
+  const int cw = width >> 1;
+  const uint8_t *y_plane = yuv;
+  const uint8_t *u_plane = yuv + width * height;
+  const uint8_t *v_plane = u_plane + cw * (height >> 1);
+  uint16_t *rgb = (uint16_t *) rgb565;
+  for (int j = 0; j < height; j += 2) {
+    const uint8_t *y0 = y_plane + j * width;
+    const uint8_t *y1 = y0 + width;
+    const uint8_t *up = u_plane + (j >> 1) * cw;
+    const uint8_t *vp = v_plane + (j >> 1) * cw;
+    uint16_t *d0 = rgb + j * width;
+    uint16_t *d1 = d0 + width;
+    for (int i = 0; i < width; i += 2) {
+      int u = up[i >> 1] - 128;
+      int v = vp[i >> 1] - 128;
+      int rc = (v * 359) >> 8;
+      int gc = (u * 88 + v * 183) >> 8;
+      int bc = (u * 454) >> 8;
+      for (int k = 0; k < 2; k++) {
+        int y = y0[i + k];
+        int r = y + rc, g = y - gc, b = y + bc;
+        r = r < 0 ? 0 : (r > 255 ? 255 : r);
+        g = g < 0 ? 0 : (g > 255 ? 255 : g);
+        b = b < 0 ? 0 : (b > 255 ? 255 : b);
+        d0[i + k] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+        y = y1[i + k];
+        r = y + rc, g = y - gc, b = y + bc;
+        r = r < 0 ? 0 : (r > 255 ? 255 : r);
+        g = g < 0 ? 0 : (g > 255 ? 255 : g);
+        b = b < 0 ? 0 : (b > 255 ? 255 : b);
+        d1[i + k] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+      }
+    }
+  }
+}
+
+#ifdef USE_H264_HP_EDGE264
+// Allocate the edge264 decoder + the I420/RGB565 buffers. Called once at the
+// start of the decode task. begin(0) = MONO-THREAD (synchronous, no pthreads):
+// multi-thread edge264 deadlocks on ESP-IDF FreeRTOS (see h264_hp). The decode
+// therefore runs inline on THIS task, which is why it has a large stack.
+bool WebRTCComponent::open_h264_decoder_() {
+  if (this->hp_dec_ != nullptr)
+    return true;
+  this->rgb_buf_size_ = (size_t) this->video_w_ * this->video_h_ * 2;
+  this->yuv_i420_size_ = (size_t) this->video_w_ * this->video_h_ * 3 / 2;
+  this->rgb_a_ = static_cast<uint8_t *>(
+      heap_caps_malloc(this->rgb_buf_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  this->rgb_b_ = static_cast<uint8_t *>(
+      heap_caps_malloc(this->rgb_buf_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  this->yuv_i420_ = static_cast<uint8_t *>(
+      heap_caps_malloc(this->yuv_i420_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (this->rgb_a_ == nullptr || this->rgb_b_ == nullptr || this->yuv_i420_ == nullptr) {
+    ESP_LOGE(TAG, "edge264 buffers alloc failed");
+    return false;
+  }
+  memset(this->rgb_a_, 0, this->rgb_buf_size_);
+  memset(this->rgb_b_, 0, this->rgb_buf_size_);
+  this->rgb_decode_ = this->rgb_a_;
+  this->rgb_display_ = this->rgb_b_;
+
+  auto *dec = new h264_hp::H264HpDecoder();
+  if (!dec->begin(0)) {
+    ESP_LOGE(TAG, "edge264 decoder init failed");
+    delete dec;
+    return false;
+  }
+  this->hp_dec_ = dec;
+  ESP_LOGI(TAG, "edge264 H.264 decoder ready (%ux%u)", this->video_w_, this->video_h_);
+  return true;
+}
+
+// Dedicated decode task (core 1): drain the H.264 access-unit queue in order,
+// edge264-decode to I420, crop/letterbox to the configured size, convert to
+// RGB565 into the back buffer, and flag it ready. The main loop swaps it onto
+// the canvas. No LVGL calls here (LVGL only runs on the main task).
+void WebRTCComponent::video_rx_fn_(void *arg) {
+  auto *self = static_cast<WebRTCComponent *>(arg);
+  auto q = static_cast<QueueHandle_t>(self->video_q_);
+  if (!self->open_h264_decoder_()) {
+    self->video_rx_task_done_ = true;
+    vTaskDelete(nullptr);
+    return;
+  }
+  auto *dec = static_cast<h264_hp::H264HpDecoder *>(self->hp_dec_);
+  const int W = self->video_w_, H = self->video_h_;
+  const int cfg_cw = W / 2, cfg_ch = H / 2;
+
+  while (self->video_rx_run_) {
+    if (q == nullptr) {
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
+    WebRtcAu au;
+    if (xQueueReceive(q, &au, pdMS_TO_TICKS(50)) != pdTRUE)
+      continue;
+    // Re-sync: after an overflow (or at start) skip P-frames until an IDR, or
+    // edge264 decodes garbage against missing reference frames.
+    if (self->need_idr_) {
+      if (!au.idr) {
+        heap_caps_free(au.data);
+        continue;
+      }
+      self->need_idr_ = false;
+    }
+    dec->decode_annexb(au.data, au.size);
+    heap_caps_free(au.data);
+
+    h264_hp::DecodedFrame f;
+    bool got = false;
+    while (dec->get_frame(&f)) {
+      const int sw = f.width & ~1;
+      const int sh = f.height & ~1;
+      if (sw > 0 && sh > 0 && f.y && f.cb && f.cr) {
+        const int dw = (sw < W ? sw : W) & ~1;
+        const int dh = (sh < H ? sh : H) & ~1;
+        if (dw < W || dh < H)
+          memset(self->yuv_i420_, 0, self->yuv_i420_size_);  // black borders
+        uint8_t *Y = self->yuv_i420_;
+        uint8_t *U = Y + (size_t) W * H;
+        uint8_t *V = U + (size_t) cfg_cw * cfg_ch;
+        for (int row = 0; row < dh; row++)
+          memcpy(Y + (size_t) row * W, f.y + (size_t) row * f.stride_y, dw);
+        for (int row = 0; row < dh / 2; row++)
+          memcpy(U + (size_t) row * cfg_cw, f.cb + (size_t) row * f.stride_c, dw / 2);
+        for (int row = 0; row < dh / 2; row++)
+          memcpy(V + (size_t) row * cfg_cw, f.cr + (size_t) row * f.stride_c, dw / 2);
+        self->convert_yuv420_to_rgb565_(self->yuv_i420_, self->rgb_decode_, W, H);
+        got = true;
+      }
+      dec->release_frame();
+    }
+    if (got) {
+      self->rgb_ready_.store(true, std::memory_order_release);
+      // Wait for the main loop to consume before decoding the next display
+      // frame, so the decode task never overwrites the buffer LVGL is showing.
+      for (int i = 0; i < 100 && self->video_rx_run_ &&
+                      self->rgb_ready_.load(std::memory_order_acquire);
+           i++)
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+  }
+  self->video_rx_task_done_ = true;
+  vTaskDelete(nullptr);
+}
+#endif  // USE_H264_HP_EDGE264
 #endif  // USE_ESP_WEBRTC_VIDEO
 
 void WebRTCComponent::start_audio_bridge_() {
@@ -977,9 +1213,25 @@ void WebRTCComponent::start() {
     this->video_tx_count_ = 0;
     xTaskCreatePinnedToCore(video_tx_fn_, "webrtc_vtx", 8192, this, 5,
                             reinterpret_cast<TaskHandle_t *>(&this->video_tx_task_), 1);
-    ESP_LOGI(TAG, "video bridge ready (camera -> H.264 %ux%u @%ufps)", this->video_w_,
+    const char *vc = (this->video_codec_ == VIDEO_CODEC_MJPEG) ? "MJPEG" : "H.264";
+    ESP_LOGI(TAG, "video bridge ready (camera -> %s %ux%u @%ufps)", vc, this->video_w_,
              this->video_h_, this->video_fps_);
   }
+#ifdef USE_H264_HP_EDGE264
+  // 4d) H.264 receive via edge264: dedicated core-1 decode task (big stack: the
+  // scalar decode runs inline on it). Only when a remote canvas is wired.
+  if (this->video_codec_ == VIDEO_CODEC_H264 && this->remote_canvas_ != nullptr &&
+      this->video_rx_task_ == nullptr) {
+    this->need_idr_ = true;
+    this->video_rx_run_ = true;
+    this->video_rx_task_done_ = false;
+    this->video_rx_count_ = 0;
+    xTaskCreatePinnedToCore(video_rx_fn_, "webrtc_vrx", 32768, this, 4,
+                            reinterpret_cast<TaskHandle_t *>(&this->video_rx_task_), 1);
+    ESP_LOGI(TAG, "H.264 receive ready (edge264 -> canvas %ux%u)", this->video_w_,
+             this->video_h_);
+  }
+#endif
 #endif
 
   // 5) Open the WebSocket and replay the queued offer (answerer: this feeds the
@@ -1012,20 +1264,35 @@ void WebRTCComponent::stop() {
   const bool had_audio = (this->audio_tx_task_ != nullptr);
   const bool had_peer = (this->task_ != nullptr);
   const bool had_video = (this->video_tx_task_ != nullptr);
+  const bool had_vrx = (this->video_rx_task_ != nullptr);
   this->audio_run_ = false;
   this->video_run_ = false;
+  this->video_rx_run_ = false;
   this->run_ = false;
   for (int i = 0; i < 60; i++) {
     bool audio_ok = !had_audio || this->audio_task_done_;
     bool peer_ok = !had_peer || this->peer_task_done_;
     bool video_ok = !had_video || this->video_task_done_;
-    if (audio_ok && peer_ok && video_ok)
+    bool vrx_ok = !had_vrx || this->video_rx_task_done_;
+    if (audio_ok && peer_ok && video_ok && vrx_ok)
       break;
     vTaskDelay(pdMS_TO_TICKS(10));
   }
   this->audio_tx_task_ = nullptr;
   this->video_tx_task_ = nullptr;
+  this->video_rx_task_ = nullptr;
   this->task_ = nullptr;
+#ifdef USE_ESP_WEBRTC_VIDEO
+  // Drain any queued H.264 access units (the decode task is gone now) and re-arm
+  // the IDR re-sync so the next call starts cleanly.
+  if (this->video_q_ != nullptr) {
+    WebRtcAu au;
+    while (xQueueReceive(static_cast<QueueHandle_t>(this->video_q_), &au, 0) == pdTRUE)
+      heap_caps_free(au.data);
+  }
+  this->need_idr_ = true;
+  this->rgb_ready_.store(false, std::memory_order_release);
+#endif
 
   // 3) Tear down signaling (destroys the WebSocket; join() rebuilds it).
   this->signaling_.stop();
@@ -1112,8 +1379,11 @@ void WebRTCComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "  Video bridge: camera -> %s (%ux%u @%ufps)", vc, this->video_w_,
                   this->video_h_, this->video_fps_);
   }
-  if (this->remote_canvas_ != nullptr)
-    ESP_LOGCONFIG(TAG, "  Remote video: MJPEG -> HW decode -> LVGL canvas");
+  if (this->remote_canvas_ != nullptr) {
+    const char *dec = (this->video_codec_ == VIDEO_CODEC_MJPEG) ? "MJPEG HW decode"
+                                                                : "H.264 edge264 SW decode";
+    ESP_LOGCONFIG(TAG, "  Remote video: %s -> LVGL canvas", dec);
+  }
   ESP_LOGCONFIG(TAG, "  Signaling: AppRTC (webrtc.espressif.com)");
 }
 

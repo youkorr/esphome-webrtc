@@ -132,7 +132,10 @@ class WebRTCComponent : public Component {
   bool open_video_encoder_();            // esp_h264 HW encoder + PPA client
   void close_video_encoder_();
   bool open_jpeg_decoder_();             // HW JPEG decoder + DMA buffers (MJPEG recv)
-  void render_remote_frame_();           // loop(): newest JPEG -> HW decode -> canvas
+  void render_remote_frame_();           // loop(): decode/swap remote frame -> canvas
+  static void video_rx_fn_(void *arg);   // edge264 H.264 decode task
+  bool open_h264_decoder_();             // edge264 decoder + queue + RGB/YUV buffers
+  void convert_yuv420_to_rgb565_(uint8_t *yuv, uint8_t *rgb565, int w, int h);
   // Remote SDP/ICE from signaling -> feed into esp_peer.
   void feed_remote_sdp_(const std::string &sdp);
   void feed_remote_candidate_(const std::string &candidate);
@@ -218,6 +221,28 @@ class WebRTCComponent : public Component {
   void *remote_canvas_{nullptr};    // lv_obj_t* (canvas showing the remote peer)
   void *remote_draw_buf_{nullptr};  // heap lv_draw_buf_t (kept void* to avoid LVGL in the header)
   bool remote_draw_buf_init_{false};
+
+  // --- edge264 H.264 receive (software High-profile decode -> LVGL canvas) ---
+  // Used when video_codec_ == H264, a remote canvas is wired, and the h264_hp
+  // (edge264) lib is in the build. Scalar decode is heavy, so it runs on its own
+  // core-1 task; the main loop only swaps the finished RGB565 buffer onto the
+  // canvas. H.264 is inter-frame coded, so access units go through an ORDERED
+  // bounded queue (not the newest-wins JPEG stash); on overflow we skip to the
+  // next IDR to re-sync. hp_dec_ kept void* so the header stays h264_hp-free.
+  void *hp_dec_{nullptr};             // h264_hp::H264HpDecoder*
+  void *video_q_{nullptr};            // QueueHandle_t of encoded access units
+  void *video_rx_task_{nullptr};      // TaskHandle_t
+  volatile bool video_rx_run_{false};
+  volatile bool video_rx_task_done_{true};
+  volatile bool need_idr_{true};      // skip P-frames until the next IDR (re-sync)
+  uint8_t *yuv_i420_{nullptr};        // contiguous I420 repack (decode task)
+  size_t yuv_i420_size_{0};
+  uint8_t *rgb_a_{nullptr};           // RGB565 double buffer
+  uint8_t *rgb_b_{nullptr};
+  uint8_t *rgb_decode_{nullptr};      // decode task writes here
+  uint8_t *rgb_display_{nullptr};     // main loop shows this
+  size_t rgb_buf_size_{0};
+  std::atomic<bool> rgb_ready_{false};
 
   void *peer_{nullptr};       // esp_peer_handle_t
   const void *ops_{nullptr};  // const esp_peer_ops_t *
