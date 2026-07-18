@@ -1,0 +1,519 @@
+## ===========================================================================
+##  ESP32-P4 — Interface de VISIO WebRTC (LVGL)
+##  Base matérielle = esp-webrtc1.yaml (écran MIPI-DSI 1024x600, tactile GT911,
+##  caméra OV5647, fdaudio ES8311/ES7210, WiFi via ESP-Hosted C6).
+##
+##  Réglé par défaut pour le TEST TÉLÉPHONE / NAVIGATEUR :
+##    video_codec: h264   +   audio_codec: g711a   (compatibles navigateur)
+##
+##  Pour un appel P4 <-> P4 (deux ESP32-P4), voir le bloc "=== P4<->P4 ===" plus
+##  bas : passe en video_codec: mjpeg + audio_codec: opus (matériel des 2 côtés,
+##  bien plus robuste et meilleure qualité).
+## ===========================================================================
+
+substitutions:
+  name: esp-webrtc
+  friendly_name: Visio P4
+  room: "video10"
+  # Palette UI
+  col_bg: "0x0B0F14"
+  col_panel: "0x161B22"
+  col_text: "0xE6EDF3"
+  col_text2: "0x8B949E"
+  col_green: "0x2EA043"
+  col_red: "0xE5484D"
+  col_amber: "0xF0883E"
+  font_family: Figtree
+  font_glyphsets: "GF_Latin_Core"
+
+esphome:
+  name: esp-webrtc
+  friendly_name: esp_webrtc
+
+esp32:
+  flash_size: 32MB
+  board: esp32-p4-evboard
+  cpu_frequency: 360MHz
+  engineering_sample: true
+  framework:
+    type: esp-idf
+    advanced:
+      enable_idf_experimental_features: true
+    sdkconfig_options:
+      CONFIG_COMPILER_OPTIMIZATION_PERF: y
+      CONFIG_SPIRAM_XIP_FROM_PSRAM: y
+      CONFIG_GDMA_ISR_IRAM_SAFE: y
+      CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM: "y"
+      # WDT : 30 s pour absorber le pic de la 1re IDR edge264 (si tu l'actives)
+      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "30"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "n"
+      CONFIG_SPIRAM_RODATA: "n"
+      CONFIG_ESP32_SPIRAM_SUPPORT: "y"
+      CONFIG_SPIRAM_USE_MALLOC: "y"
+      CONFIG_LWIP_SO_RCVBUF: "y"
+      CONFIG_LWIP_MAX_SOCKETS: "16"
+      CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"
+      CONFIG_ESP_TIMER_TASK_STACK_SIZE: "4096"
+      CONFIG_ESP_TASK_LOOP_STACK_SIZE: "16384"
+      CONFIG_SPIRAM_SPEED_200M: "y"
+      CONFIG_SPIRAM_SPEED: "200"
+      # Buffers WiFi (C6) + AMPDU
+      CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM: "16"
+      CONFIG_WIFI_RMT_DYNAMIC_RX_BUFFER_NUM: "64"
+      CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM: "64"
+      CONFIG_WIFI_RMT_AMPDU_TX_ENABLED: "y"
+      CONFIG_WIFI_RMT_TX_BA_WIN: "32"
+      CONFIG_WIFI_RMT_AMPDU_RX_ENABLED: "y"
+      CONFIG_WIFI_RMT_RX_BA_WIN: "32"
+      CONFIG_LWIP_UDP_RECVMBOX_SIZE: "64"
+      CONFIG_LWIP_TCPIP_RECVMBOX_SIZE: "64"
+      CONFIG_LWIP_TCP_RECVMBOX_SIZE: "64"
+
+logger:
+
+api:
+  encryption:
+    key: "KaRd3AscmpwpYoFJnSnMdQkXK6QxXVGJU7ecLoBolvc="
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: esp_webrtc Fallback Hotspot
+    password: "xfUNyDrVbDpM"
+
+captive_portal:
+
+esp32_hosted:
+  variant: ESP32C6
+  reset_pin: GPIO54
+  cmd_pin: GPIO19
+  clk_pin: GPIO18
+  d0_pin: GPIO14
+  d1_pin: GPIO15
+  d2_pin: GPIO16
+  d3_pin: GPIO17
+  active_high: true
+  use_psram: true
+  slot: 1
+
+psram:
+  mode: hex
+  speed: 200MHz
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/youkorr/lvgl_9.5
+      ref: claude/jolly-lamport-ERZOC
+    components: [lvgl, image, font]
+    refresh: 0s
+  - source:
+      type: git
+      url: https://github.com/youkorr/esphome-webrtc
+      ref: claude/esphome-webrtc-face-toface-9b95pu
+    components: [webrtc]
+    refresh: 0s
+  - source:
+      type: git
+      url: https://github.com/youkorr/face-toface
+      ref: claude/mit-license-face-to-face-p9fc6m
+    components: [fdaudio]
+    refresh: 0s
+  - source:
+      type: git
+      url: https://github.com/youkorr/esphome_esp-video
+      ref: claude/usb-uvc-consumer-integration-gnbflf
+    components: [esp_video, esp_cam_sensor, lvgl_camera_display]
+    refresh: 0s
+  # edge264 (décodage H.264 logiciel) — nécessaire SEULEMENT pour afficher la
+  # vidéo H.264 d'un navigateur/IP-cam sur l'écran. Laisse la ligne `h264_hp:`
+  # décommentée plus bas pour l'activer. (Pour P4<->P4 en MJPEG, pas besoin.)
+  - source:
+      type: git
+      url: https://github.com/youkorr/ip-camera-viewer
+      ref: claude/esphome-webrtc-face-toface-9b95pu
+    components: [h264_hp]
+    refresh: 0s
+
+# Charge edge264 (sinon la réception H.264 -> canvas est ignorée). Commente
+# cette ligne si tu ne veux PAS de réception vidéo (test le plus stable).
+h264_hp:
+
+## ===========================================================================
+##  WEBRTC — réglage TEST TÉLÉPHONE (navigateur)
+## ===========================================================================
+webrtc:
+  id: rtc
+  room_id: "${room}"
+  # --- Test téléphone / navigateur (par défaut) ---
+  video_codec: h264
+  audio_codec: g711a
+  video_direction: sendrecv     # send_only = plus stable si edge264 crashe
+  # --- === P4<->P4 === (décommente ces 2 lignes ET commente les 2 du dessus) ---
+  # video_codec: mjpeg
+  # audio_codec: opus
+  camera_id: tab5_cam
+  speaker_id: wave_speaker
+  microphone_id: wave_microphone
+  sample_rate: 16000
+  video_width: 640
+  video_height: 480
+  fps: 15
+  auto_start: false
+  ice_servers:
+    - url: "stun:stun.l.google.com:19302"
+    - url: "turn:openrelay.metered.ca:80"
+      username: "openrelayproject"
+      password: "openrelayproject"
+  on_paired:
+    - lvgl.label.update:
+        id: call_status
+        text: "● Appairé…"
+        text_color: ${col_amber}
+  on_connected:
+    - lvgl.label.update:
+        id: call_status
+        text: "● Connecté"
+        text_color: ${col_green}
+    - lvgl.widget.hide: remote_hint
+  on_disconnected:
+    - lvgl.label.update:
+        id: call_status
+        text: "● Terminé"
+        text_color: ${col_text2}
+    - lvgl.widget.show: remote_hint
+  on_connect_failed:
+    - lvgl.label.update:
+        id: call_status
+        text: "● Échec connexion"
+        text_color: ${col_red}
+    - lvgl.widget.show: remote_hint
+
+## ===========================================================================
+##  AUDIO / CAMÉRA / DISPLAY (identique à ta base validée)
+## ===========================================================================
+i2c:
+  - id: bsp_bus
+    sda: GPIO07
+    scl: GPIO08
+    frequency: 400kHz
+
+fdaudio:
+  id: audio_engine
+  lrclk_pin: GPIO10
+  bclk_pin: GPIO12
+  mclk_pin: GPIO13
+  din_pin: GPIO11
+  dout_pin: GPIO9
+  i2c_port: 0
+  output_codec: es8311
+  output_address: 0x18
+  mic_address: 0x40
+  mic_gain_db: 24
+  output_volume: 50
+  sample_rate: 16000
+  enable_aec: false
+
+microphone:
+  - platform: fdaudio
+    id: wave_microphone
+    fdaudio_id: audio_engine
+
+speaker:
+  - platform: fdaudio
+    id: wave_speaker
+    fdaudio_id: audio_engine
+
+esp_video:
+  i2c_id: bsp_bus
+  xclk_pin: GPIO36
+  xclk_freq: 24000000
+  enable_jpeg: true
+  enable_isp: true
+  use_heap_allocator: false
+
+esp_cam_sensor:
+  id: tab5_cam
+  i2c_id: bsp_bus
+  sensor_type: ov5647
+  resolution: "800x640"
+  framerate: 30
+  jpeg_quality: 15
+  mirror_x: false
+  mirror_y: false
+  rotation: 0
+  crop_offset_x: 0
+
+lvgl_camera_display:
+  id: camera_display
+  camera_id: tab5_cam
+  canvas_id: camera_canvas
+  update_interval: 33ms
+
+output:
+  - platform: ledc
+    pin: GPIO32
+    id: backlight_pwm
+    frequency: 1000Hz
+    inverted: true
+
+esp_ldo:
+  - voltage: 2.5V
+    channel: 3
+  - voltage: 2.5V
+    channel: 4
+
+light:
+  - platform: monochromatic
+    output: backlight_pwm
+    name: "Display Backlight"
+    id: backlight
+    restore_mode: RESTORE_DEFAULT_ON
+    default_transition_length: 250ms
+
+switch:
+  - platform: gpio
+    pin: GPIO53
+    name: "Audio Amplifier"
+    id: audio_amplifier
+    restore_mode: ALWAYS_ON
+  - platform: template
+    name: "Aperçu caméra locale"
+    id: lvgl_display_enable_switch
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    turn_on_action:
+      - lambda: 'id(camera_display).set_enabled(true);'
+    turn_off_action:
+      - lambda: 'id(camera_display).set_enabled(false);'
+
+# Boutons Home Assistant (doublon pratique des boutons à l'écran)
+button:
+  - platform: template
+    name: "Appeler"
+    on_press:
+      - webrtc.start: rtc
+      - switch.turn_on: lvgl_display_enable_switch
+  - platform: template
+    name: "Raccrocher"
+    on_press:
+      - webrtc.stop: rtc
+      - switch.turn_off: lvgl_display_enable_switch
+
+font:
+  - file: {type: gfonts, family: "${font_family}", weight: 300}
+    id: f_18
+    size: 18
+    glyphsets: ["${font_glyphsets}"]
+  - file: {type: gfonts, family: "${font_family}", weight: 600}
+    id: f_24
+    size: 24
+    glyphsets: ["${font_glyphsets}"]
+  - file: {type: gfonts, family: "${font_family}", weight: 700}
+    id: f_30
+    size: 30
+    glyphsets: ["${font_glyphsets}"]
+
+touchscreen:
+  - platform: gt911
+    id: touch
+    i2c_id: bsp_bus
+    reset_pin: GPIO23
+    update_interval: 8ms
+    on_touch:
+      - light.turn_on: backlight
+    transform:
+      swap_xy: false
+      mirror_x: true
+      mirror_y: true
+
+display:
+  - platform: mipi_dsi
+    id: main_display
+    show_test_card: false
+    model: CUSTOM
+    update_interval: never
+    auto_clear_enabled: false
+    hsync_back_porch: 160
+    lane_bit_rate: 1000Mbps
+    color_order: rgb
+    lanes: 2
+    reset_pin:
+      number: 33
+    hsync_pulse_width: 70
+    hsync_front_porch: 160
+    vsync_back_porch: 23
+    vsync_pulse_width: 1
+    vsync_front_porch: 12
+    pclk_frequency: 51MHz
+    dimensions:
+      width: 1024
+      height: 600
+    init_sequence:
+      - [0xB2, 0x10]
+      - [0x80, 0x8B]
+      - [0x81, 0x78]
+      - [0x82, 0x84]
+      - [0x83, 0x88]
+      - [0x84, 0xA8]
+      - [0x85, 0xE3]
+      - [0x86, 0x88]
+      - [0x11, 0x00]
+      - delay 120ms
+      - [0x29]
+
+## ===========================================================================
+##  INTERFACE VISIO (LVGL)  — 1024x600
+##  Layout :  [ vidéo correspondant 640x480 ]   [ panneau droit ]
+##                                               - statut
+##                                               - Appeler / Raccrocher
+##                                               - auto-aperçu "Vous"
+## ===========================================================================
+lvgl:
+  use_ppa: true
+  use_ppa_img: true
+  color_depth: 16
+  buffer_size: 100%
+  byte_order: little_endian
+  rotation: 180
+  bg_color: ${col_bg}
+  pages:
+    - id: call_page
+      bg_color: ${col_bg}
+      on_load:
+        - lambda: |-
+            // Relier les deux canvas à leur composant (une fois les widgets créés)
+            id(camera_display).configure_canvas(id(camera_canvas));
+            id(rtc).set_remote_canvas(id(remote_canvas));
+      widgets:
+        # ---------- Barre de titre ----------
+        - obj:
+            x: 0
+            y: 0
+            width: 1024
+            height: 52
+            bg_color: ${col_panel}
+            bg_opa: COVER
+            border_width: 0
+            radius: 0
+            pad_all: 0
+            widgets:
+              - label:
+                  x: 16
+                  y: 12
+                  text: "Visio ESP32-P4"
+                  text_color: ${col_text}
+                  text_font: f_24
+              - label:
+                  id: call_status
+                  align: RIGHT_MID
+                  x: -16
+                  text: "● En attente"
+                  text_color: ${col_text2}
+                  text_font: f_18
+
+        # ---------- Vidéo du correspondant (canvas 640x480) ----------
+        - canvas:
+            id: remote_canvas
+            x: 16
+            y: 64
+            width: 640
+            height: 480
+            bg_color: 0x000000
+            bg_opa: COVER
+            border_width: 2
+            border_color: ${col_panel}
+            radius: 8
+            pad_all: 0
+        - label:
+            id: remote_hint
+            x: 120
+            y: 290
+            text: "En attente du correspondant…"
+            text_color: ${col_text2}
+            text_font: f_24
+
+        # ---------- Panneau de droite ----------
+        # Bouton Appeler (vert)
+        - button:
+            id: btn_call
+            x: 680
+            y: 72
+            width: 328
+            height: 92
+            bg_color: ${col_green}
+            bg_opa: COVER
+            radius: 14
+            on_click:
+              - webrtc.start: rtc
+              - switch.turn_on: lvgl_display_enable_switch
+              - lvgl.label.update:
+                  id: call_status
+                  text: "● Appel en cours…"
+                  text_color: ${col_amber}
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "Appeler"
+                  text_color: 0xFFFFFF
+                  text_font: f_30
+
+        # Bouton Raccrocher (rouge)
+        - button:
+            id: btn_hangup
+            x: 680
+            y: 176
+            width: 328
+            height: 92
+            bg_color: ${col_red}
+            bg_opa: COVER
+            radius: 14
+            on_click:
+              - webrtc.stop: rtc
+              - switch.turn_off: lvgl_display_enable_switch
+              - lvgl.label.update:
+                  id: call_status
+                  text: "● En attente"
+                  text_color: ${col_text2}
+              - lvgl.widget.show: remote_hint
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "Raccrocher"
+                  text_color: 0xFFFFFF
+                  text_font: f_30
+
+        # Etiquette "Vous"
+        - label:
+            x: 680
+            y: 292
+            text: "Vous"
+            text_color: ${col_text2}
+            text_font: f_18
+
+        # Auto-aperçu (caméra locale) — médaillon 328x246
+        - canvas:
+            id: camera_canvas
+            x: 680
+            y: 316
+            width: 328
+            height: 246
+            bg_color: 0x000000
+            bg_opa: COVER
+            border_width: 2
+            border_color: ${col_panel}
+            radius: 8
+            pad_all: 0
+
+        # Salle
+        - label:
+            align: BOTTOM_LEFT
+            x: 20
+            y: -12
+            text: "Salle : ${room}"
+            text_color: ${col_text2}
+            text_font: f_18
