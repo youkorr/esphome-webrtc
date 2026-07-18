@@ -1455,14 +1455,18 @@ void WebRTCComponent::start() {
 #endif
 #endif
 
-  // 5) Open the WebSocket and replay the queued offer (answerer: this feeds the
-  // peer's offer, so esp_peer produces the answer via on_msg).
-  this->signaling_.connect();
+  // 5) Start the ICE agent for BOTH roles. esp_peer_new_connection() gathers ICE
+  // and produces the local SDP; esp_webrtc calls it unconditionally (no role
+  // check). We previously called it only for the offerer, so the ANSWERER's ICE
+  // agent never started ("AGENT: Start agent" was missing on the answerer) and a
+  // P4<->P4 call never connected. Do it BEFORE connect() replays the queued
+  // offer, so the answerer's agent is up when that offer arrives.
+  ops->new_connection(handle);
 
-  // 6) Only the offerer creates the connection (generates the local offer).
-  if (!this->controlled_) {
-    ops->new_connection(handle);
-  }
+  // 6) Open the WebSocket and replay the queued offer (answerer: this feeds the
+  // peer's offer, so esp_peer produces the answer via on_msg; offerer already
+  // emitted its offer from new_connection above).
+  this->signaling_.connect();
   this->started_ = true;
 }
 
