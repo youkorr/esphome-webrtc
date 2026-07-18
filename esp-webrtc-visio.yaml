@@ -14,7 +14,8 @@
 substitutions:
   name: esp-webrtc
   friendly_name: Visio P4
-  room: "video10"
+  # !!! LE MÊME NOM DE SALLE QUE LE TAB5 !!!  (ce n'est PAS une adresse IP)
+  room: "tab5duo"
   # Palette UI
   col_bg: "0x0B0F14"
   col_panel: "0x161B22"
@@ -74,6 +75,8 @@ logger:
 api:
   encryption:
     key: "KaRd3AscmpwpYoFJnSnMdQkXK6QxXVGJU7ecLoBolvc="
+  # Sans Home Assistant, l'API redémarre l'ESP au bout de 15 min. 0s = jamais.
+  reboot_timeout: 0s
 
 ota:
   - platform: esphome
@@ -139,33 +142,29 @@ external_components:
     components: [h264_hp]
     refresh: 0s
 
-# Charge edge264 (sinon la réception H.264 -> canvas est ignorée). Commente
-# cette ligne si tu ne veux PAS de réception vidéo (test le plus stable).
-h264_hp:
+# edge264 inutile en P4<->P4 (MJPEG = décodage JPEG matériel). Désactivé pour
+# libérer de la PSRAM. Décommente seulement pour un test navigateur en h264.
+# h264_hp:
 
 ## ===========================================================================
-##  WEBRTC — réglage TEST TÉLÉPHONE (navigateur)
+##  WEBRTC — WAVESHARE 1024x600, P4 <-> P4 (MJPEG + Opus)
+##  Même room_id que le Tab5 ("tab5duo"). RÉSOLUTION : voir la note ci-dessous.
+##  video_width/height DOIT être IDENTIQUE sur les deux P4 (le récepteur taille
+##  ses buffers de décodage sur SA config). Waveshare<->Tab5 -> 1024x600 des deux
+##  côtés (mets aussi 1024x600 sur le Tab5 pour ce duo).
 ## ===========================================================================
 webrtc:
   id: rtc
   room_id: "${room}"
-  # --- Test téléphone / navigateur (par défaut) ---
-  video_codec: h264
-  audio_codec: g711a
-  # send_only : on N'AFFICHE PAS la vidéo du navigateur (edge264 sur flux WebRTC
-  # avec pertes = crash). Tu envoies ta caméra au tél + audio 2 sens = STABLE.
-  # Passe à sendrecv UNIQUEMENT en P4<->P4 (MJPEG), pas avec un navigateur.
-  video_direction: send_only
-  # --- === P4<->P4 === (décommente ces 3 lignes ET commente les 3 du dessus) ---
-  # video_codec: mjpeg
-  # audio_codec: opus
-  # video_direction: sendrecv
+  video_codec: mjpeg          # JPEG matériel encode+decode (P4<->P4)
+  audio_codec: opus           # 16 kHz large bande (P4<->P4)
+  video_direction: sendrecv   # envoie ET reçoit la vidéo
   camera_id: tab5_cam
   speaker_id: wave_speaker
   microphone_id: wave_microphone
   sample_rate: 16000
-  video_width: 640
-  video_height: 480
+  video_width: 1024
+  video_height: 600
   fps: 15
   auto_start: false
   ice_servers:
@@ -394,22 +393,41 @@ lvgl:
             id(camera_display).configure_canvas(id(camera_canvas));
             id(rtc).set_remote_canvas(id(remote_canvas));
       widgets:
-        # ---------- Barre de titre ----------
+        # ---------- Vidéo du correspondant : PLEIN ÉCRAN 1024x600 ----------
+        - canvas:
+            id: remote_canvas
+            x: 0
+            y: 0
+            width: 1024
+            height: 600
+            bg_color: 0x000000
+            bg_opa: COVER
+            border_width: 0
+            radius: 0
+            pad_all: 0
+        - label:
+            id: remote_hint
+            align: CENTER
+            text: "En attente du correspondant…"
+            text_color: ${col_text2}
+            text_font: f_24
+
+        # ---------- Barre de statut (superposée) ----------
         - obj:
             x: 0
             y: 0
             width: 1024
             height: 52
             bg_color: ${col_panel}
-            bg_opa: COVER
+            bg_opa: 70%
             border_width: 0
             radius: 0
             pad_all: 0
             widgets:
               - label:
                   x: 16
-                  y: 12
-                  text: "Visio ESP32-P4"
+                  y: 13
+                  text: "Visio ESP32-P4  ·  Salle ${room}"
                   text_color: ${col_text}
                   text_font: f_24
               - label:
@@ -420,35 +438,28 @@ lvgl:
                   text_color: ${col_text2}
                   text_font: f_18
 
-        # ---------- Vidéo du correspondant (canvas 640x480) ----------
+        # ---------- Auto-aperçu (caméra locale) — médaillon bas-droite ----------
         - canvas:
-            id: remote_canvas
-            x: 16
-            y: 64
-            width: 640
-            height: 480
+            id: camera_canvas
+            x: 754
+            y: 426
+            width: 256
+            height: 160
             bg_color: 0x000000
             bg_opa: COVER
             border_width: 2
             border_color: ${col_panel}
             radius: 8
             pad_all: 0
-        - label:
-            id: remote_hint
-            x: 120
-            y: 290
-            text: "En attente du correspondant…"
-            text_color: ${col_text2}
-            text_font: f_24
 
-        # ---------- Panneau de droite ----------
-        # Bouton Appeler (vert)
+        # ---------- Boutons superposés (bas-gauche) ----------
         - button:
             id: btn_call
-            x: 680
-            y: 72
-            width: 328
-            height: 92
+            align: BOTTOM_LEFT
+            x: 20
+            y: -20
+            width: 220
+            height: 76
             bg_color: ${col_green}
             bg_opa: COVER
             radius: 14
@@ -465,14 +476,13 @@ lvgl:
                   text: "Appeler"
                   text_color: 0xFFFFFF
                   text_font: f_30
-
-        # Bouton Raccrocher (rouge)
         - button:
             id: btn_hangup
-            x: 680
-            y: 176
-            width: 328
-            height: 92
+            align: BOTTOM_LEFT
+            x: 256
+            y: -20
+            width: 220
+            height: 76
             bg_color: ${col_red}
             bg_opa: COVER
             radius: 14
@@ -490,34 +500,3 @@ lvgl:
                   text: "Raccrocher"
                   text_color: 0xFFFFFF
                   text_font: f_30
-
-        # Etiquette "Vous"
-        - label:
-            x: 680
-            y: 292
-            text: "Vous"
-            text_color: ${col_text2}
-            text_font: f_18
-
-        # Auto-aperçu (caméra locale) — médaillon 328x246
-        - canvas:
-            id: camera_canvas
-            x: 680
-            y: 316
-            width: 328
-            height: 246
-            bg_color: 0x000000
-            bg_opa: COVER
-            border_width: 2
-            border_color: ${col_panel}
-            radius: 8
-            pad_all: 0
-
-        # Salle
-        - label:
-            align: BOTTOM_LEFT
-            x: 20
-            y: -12
-            text: "Salle : ${room}"
-            text_color: ${col_text2}
-            text_font: f_18
