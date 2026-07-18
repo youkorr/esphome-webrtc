@@ -23,6 +23,7 @@
 extern "C" {
 #include "esp_peer.h"
 #include "esp_peer_default.h"
+#include "media_lib_adapter.h"
 }
 
 #ifdef USE_ESP_WEBRTC_OPUS
@@ -423,6 +424,12 @@ void WebRTCComponent::feed_remote_candidate_(const std::string &candidate) {
 
 void WebRTCComponent::setup() {
   ESP_LOGCONFIG(TAG, "Setting up WebRTC (esp_peer, room=%s)...", this->room_id_.c_str());
+  // Register media_lib's default adapters (OS/crypt/RANDOM). esp_peer draws its
+  // ICE ufrag/pwd, DTLS cert and SSRCs from media_lib's random source; without
+  // this init that source is a fixed stub, so two identical firmwares produce
+  // IDENTICAL credentials -> ICE/SSRC/DTLS collisions -> P4<->P4 never connects.
+  // Espressif's demos call this first thing in app_main.
+  media_lib_add_default_adapter();
 #ifdef USE_ESP_WEBRTC_VIDEO
   // MJPEG receive: the peer task stashes JPEG frames guarded by this mutex; the
   // decode/canvas draw happen in loop(). Created up front so the first frame
