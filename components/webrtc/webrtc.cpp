@@ -15,8 +15,10 @@
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 #include "esp_heap_caps.h"
+#include "esp_random.h"
 
 #include <cstring>
+#include <cstdlib>
 
 extern "C" {
 #include "esp_peer.h"
@@ -442,6 +444,11 @@ bool WebRTCComponent::open_peer_() {
   if (this->peer_ != nullptr) {
     return true;
   }
+  // Seed libc rand() with the hardware RNG. esp_peer derives its ICE ufrag/pwd
+  // (and session id) from rand(); if it's never seeded, TWO identical firmwares
+  // generate the SAME ice-ufrag -> ICE username collision -> P4<->P4 never
+  // connects (works with a browser only because the browser has its own creds).
+  srand(esp_random());
   this->ops_ = reinterpret_cast<const void *>(esp_peer_get_default_impl());
   if (this->ops_ == nullptr) {
     ESP_LOGE(TAG, "no default esp_peer impl (out of memory?)");
