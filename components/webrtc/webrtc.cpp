@@ -1008,7 +1008,14 @@ bool WebRTCComponent::open_jpeg_decoder_() {
   }
   this->jdec_ = jd;
 
-  const size_t cap = (size_t) this->video_w_ * this->video_h_ * 2;
+  // Size the decode buffers to handle ANY peer resolution up to 720p (or our own
+  // send resolution if larger), NOT just our own video_width/height. This
+  // DECOUPLES send from receive: the two ends can run different resolutions and
+  // each simply adapts to whatever the other sends (no dropped frames).
+  size_t cap = (size_t) this->video_w_ * this->video_h_ * 2;
+  const size_t cap_720p = (size_t) 1280 * 720 * 2;
+  if (cap < cap_720p)
+    cap = cap_720p;
   jpeg_decode_memory_alloc_cfg_t incfg = {};
   incfg.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER;
   size_t gi = 0;
