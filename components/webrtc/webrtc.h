@@ -48,6 +48,16 @@ enum MediaDir {
   MEDIA_DIR_SEND_RECV = (1 << 0) | (1 << 1),
 };
 
+// Who offers (creates the SDP offer) in the call. AUTO defers to AppRTC join
+// order (fine for P4<->browser); CALLER/CALLEE pin the role so a fixed P4<->P4
+// pair always elects the same offerer/answerer regardless of boot order or
+// ghost clients left in the room by a crash.
+enum PeerRole {
+  ROLE_AUTO = 0,
+  ROLE_CALLER,   // always the offerer (CONTROLLING)
+  ROLE_CALLEE,   // always the answerer (CONTROLLED)
+};
+
 struct IceServer {
   std::string url;
   std::string username;
@@ -62,6 +72,7 @@ class WebRTCComponent : public Component {
   float get_setup_priority() const override { return setup_priority::LATE; }
 
   void set_room_id(const std::string &r) { this->room_id_ = r; }
+  void set_role(PeerRole r) { this->role_ = r; }
   void set_video_codec(VideoCodec c) { this->video_codec_ = c; }
   void set_audio_codec(AudioCodec c) { this->audio_codec_ = c; }
   void set_video_direction(MediaDir d) { this->video_dir_ = d; }
@@ -149,6 +160,7 @@ class WebRTCComponent : public Component {
   void on_mic_data_(const std::vector<uint8_t> &data);  // mic cb -> ring buffer
 
   std::string room_id_{"esphome_room"};
+  PeerRole role_{ROLE_AUTO};
   VideoCodec video_codec_{VIDEO_CODEC_H264};
   AudioCodec audio_codec_{AUDIO_CODEC_OPUS};
   MediaDir video_dir_{MEDIA_DIR_SEND_RECV};

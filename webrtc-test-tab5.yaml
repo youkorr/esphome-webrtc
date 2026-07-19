@@ -183,6 +183,10 @@ external_components:
 webrtc:
   id: rtc
   room_id: "${room}"
+  role: caller                # Tab5 = celui qui APPELLE (offerer fixe).
+                              # Le Waveshare doit être en role: callee.
+                              # Ainsi le rôle ne dépend plus de l'ordre de
+                              # démarrage ni d'un client fantôme dans la room.
   video_codec: mjpeg          # JPEG matériel encode+decode (P4<->P4)
   audio_codec: opus           # 16 kHz large bande (P4<->P4)
   video_direction: sendrecv   # envoie ET reçoit la vidéo

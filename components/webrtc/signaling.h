@@ -38,6 +38,10 @@ class ApprtcSignaling {
   void send_candidate(const std::string &candidate);
 
   bool is_initiator() const { return this->is_initiator_; }
+  // Override the server-assigned initiator flag (call AFTER join()). Used when the
+  // role is pinned by config so the offer/answer election no longer depends on
+  // AppRTC join order (which flips when a crashed peer leaves a ghost in the room).
+  void force_initiator(bool v) { this->is_initiator_ = v; }
 
   // Invoked from the (static) websocket event handler in signaling.cpp.
   void on_ws_connected_();

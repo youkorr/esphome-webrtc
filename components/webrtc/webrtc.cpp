@@ -1366,13 +1366,32 @@ void WebRTCComponent::start() {
     return;
   }
   // 1) Join the room first, so we know whether we offer or answer.
+  // Retry a few times: the AppRTC room holds only 2 slots, and a crashed/rebooted
+  // peer can leave a ghost that makes the join look "full" (no client_id) until
+  // the server expires it or the real peer leaves. A short retry rides that out.
   std::string url = "https://webrtc.espressif.com/join/" + this->room_id_;
   ESP_LOGI(TAG, "Joining signaling room: %s", url.c_str());
-  if (!this->signaling_.join(url)) {
-    ESP_LOGE(TAG, "signaling join failed");
+  bool joined = false;
+  for (int attempt = 1; attempt <= 3 && !joined; attempt++) {
+    joined = this->signaling_.join(url);
+    if (!joined && attempt < 3) {
+      ESP_LOGW(TAG, "join attempt %d failed (room busy/ghost client?); retrying in 3s", attempt);
+      vTaskDelay(pdMS_TO_TICKS(3000));
+    }
+  }
+  if (!joined) {
+    ESP_LOGE(TAG, "signaling join failed (room full or unreachable)");
     return;
   }
   this->controlled_ = !this->signaling_.is_initiator();
+  // Pin the role if configured, so the offerer/answerer election no longer
+  // depends on AppRTC join order (which flips when a ghost occupies the room).
+  if (this->role_ != ROLE_AUTO) {
+    const bool caller = (this->role_ == ROLE_CALLER);
+    this->signaling_.force_initiator(caller);
+    this->controlled_ = !caller;
+    ESP_LOGI(TAG, "role pinned by config: %s", caller ? "caller (offerer)" : "callee (answerer)");
+  }
   ESP_LOGI(TAG, "role: %s", this->controlled_ ? "answerer (controlled)" : "offerer (controlling)");
 
   // 2) Open the peer with the correct role.
