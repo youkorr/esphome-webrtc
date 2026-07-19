@@ -567,27 +567,33 @@ lvgl:
             // Un seul canvas : celui du correspondant.
             id(rtc).set_remote_canvas(id(remote_canvas));
       widgets:
-        # ---------- Vidéo du correspondant : PLEIN ÉCRAN 1280x720 ----------
+        # ---------- Vidéo du correspondant ----------
+        # Le canvas fait la TAILLE DE LA VIDÉO (640x480) et est centré. IMPORTANT :
+        # width/height doivent = video_width/video_height du bloc webrtc, sinon
+        # l'image est rognée ou décalée (le décodeur pose un buffer à la taille
+        # décodée, il n'y a pas de mise à l'échelle).
         - canvas:
             id: remote_canvas
-            x: 0
-            y: 0
-            width: 1280
-            height: 720
+            align: CENTER
+            width: 640
+            height: 480
             bg_color: 0x000000
             bg_opa: COVER
-            border_width: 0
-            radius: 0
+            border_width: 2
+            border_color: ${col_panel}
+            radius: 8
             pad_all: 0
+        # Message d'attente (par-dessus le canvas, masqué à la connexion)
         - label:
             id: remote_hint
             align: CENTER
             text: "En attente du correspondant…"
             text_color: ${col_text2}
-            text_font: f_30
+            text_font: f_24
 
-        # ---------- Barre de statut (superposée, semi-transparente) ----------
+        # ---------- Barre de statut (superposée, haut) ----------
         - obj:
+            align: TOP_MID
             x: 0
             y: 0
             width: 1280
@@ -599,8 +605,8 @@ lvgl:
             pad_all: 0
             widgets:
               - label:
+                  align: LEFT_MID
                   x: 16
-                  y: 14
                   text: "Visio ESP32-P4  ·  Salle ${room}"
                   text_color: ${col_text}
                   text_font: f_24
@@ -612,13 +618,13 @@ lvgl:
                   text_color: ${col_text2}
                   text_font: f_18
 
-        # ---------- Boutons superposés (bas-gauche) ----------
+        # ---------- Boutons superposés (bas) ----------
         - button:
             id: btn_call
-            align: BOTTOM_LEFT
-            x: 24
+            align: BOTTOM_MID
+            x: -140
             y: -24
-            width: 240
+            width: 250
             height: 84
             bg_color: ${col_green}
             bg_opa: COVER
@@ -637,10 +643,10 @@ lvgl:
                   text_font: f_30
         - button:
             id: btn_hangup
-            align: BOTTOM_LEFT
-            x: 280
+            align: BOTTOM_MID
+            x: 140
             y: -24
-            width: 240
+            width: 250
             height: 84
             bg_color: ${col_red}
             bg_opa: COVER
