@@ -898,6 +898,14 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
       continue;
     }
     uint32_t t0 = millis();
+    // We are the sole camera consumer (the one-canvas UI has no
+    // lvgl_camera_display), so nothing else drives the V4L2 capture. Dequeue a
+    // fresh frame ourselves — this advances current_buffer_index_, without
+    // which get_current_rgb_frame() reports "no buffer available".
+    if (!cam->capture_frame()) {
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
     esp_cam_sensor::SimpleBufferElement *fb = nullptr;
     uint8_t *rgb = nullptr;
     int w = 0, h = 0;

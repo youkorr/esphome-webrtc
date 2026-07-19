@@ -159,6 +159,8 @@ webrtc:
   video_codec: mjpeg          # JPEG matériel encode+decode (P4<->P4)
   audio_codec: opus           # 16 kHz large bande (P4<->P4)
   video_direction: sendrecv   # envoie ET reçoit la vidéo
+  audio_direction: sendrecv   # envoie ET reçoit l'audio
+  enable_data_channel: true   # ESSENTIEL : la vidéo MJPEG transite par le data channel
   camera_id: tab5_cam
   speaker_id: wave_speaker
   microphone_id: wave_microphone
