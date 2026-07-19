@@ -769,18 +769,17 @@ bool WebRTCComponent::open_video_encoder_() {
 
   if (mjpeg) {
     // MJPEG: PPA emits RGB565 (scaled) straight into the HW JPEG encoder input,
-    // and the encoder writes the JPEG bitstream. Both buffers must come from
-    // jpeg_alloc_encoder_mem (DMA-capable, correctly aligned for the codec).
+    // then the encoder writes the JPEG bitstream. The PPA OUTPUT buffer must be
+    // 64-byte (cache-line) aligned in address AND size, which jpeg_alloc_encoder_mem
+    // does NOT guarantee ("out.buffer addr not aligned to cache line size").
+    // Use heap_caps_aligned_alloc(64,...) like the H.264 path (DMA-capable PSRAM,
+    // valid as both the PPA output and the JPEG encoder input).
     this->yuv_buf_size_ = (size_t) this->enc_w_ * this->enc_h_ * 2;   // RGB565 in
     this->h264_buf_size_ = (size_t) this->enc_w_ * this->enc_h_ * 2;  // JPEG out cap
-    jpeg_encode_memory_alloc_cfg_t imcfg = {};
-    imcfg.buffer_direction = JPEG_ENC_ALLOC_INPUT_BUFFER;
-    size_t got_in = 0;
-    this->yuv_buf_ = jpeg_alloc_encoder_mem(this->yuv_buf_size_, &imcfg, &got_in);
-    jpeg_encode_memory_alloc_cfg_t omcfg = {};
-    omcfg.buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER;
-    size_t got_out = 0;
-    this->h264_buf_ = jpeg_alloc_encoder_mem(this->h264_buf_size_, &omcfg, &got_out);
+    this->yuv_buf_ =
+        heap_caps_aligned_alloc(64, this->yuv_buf_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    this->h264_buf_ =
+        heap_caps_aligned_alloc(64, this->h264_buf_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (this->yuv_buf_ == nullptr || this->h264_buf_ == nullptr) {
       ESP_LOGE(TAG, "JPEG enc buffers alloc failed (in=%u out=%u)",
                (unsigned) this->yuv_buf_size_, (unsigned) this->h264_buf_size_);
@@ -1387,9 +1386,11 @@ void WebRTCComponent::start() {
   this->peer_task_done_ = false;
   this->audio_tx_count_ = 0;
   this->audio_rx_count_ = 0;
-  // 16 KB: the incoming-audio callback (on_audio_frame_) runs on this task, and
-  // Opus decode needs several KB of stack on top of esp_peer's main_loop.
-  xTaskCreatePinnedToCore(task_fn_, "webrtc_peer", 16384, this, 5,
+  // 32 KB: this task runs esp_peer's main_loop (ICE + the heavy mbedTLS DTLS
+  // handshake + SCTP) AND the incoming-audio callback (Opus decode ~6 KB). At
+  // connect time those overlap and 16 KB overflowed (crash right after
+  // "DTLS handshake success" / audio bridge start).
+  xTaskCreatePinnedToCore(task_fn_, "webrtc_peer", 32768, this, 5,
                           reinterpret_cast<TaskHandle_t *>(&this->task_), 0);
 
   // 4b) Audio bridge: mic ring + callback + G.711/Opus TX task (only if configured).
