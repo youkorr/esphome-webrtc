@@ -158,7 +158,7 @@ external_components:
       type: git
       url: https://github.com/youkorr/esphome_esp-video
       ref: claude/usb-uvc-consumer-integration-gnbflf
-    components: [esp_video, esp_cam_sensor, lvgl_camera_display]
+    components: [esp_video, esp_cam_sensor]
     refresh: 0s
   # edge264 (décodage H.264 logiciel) — nécessaire SEULEMENT pour afficher la
   # vidéo H.264 d'un navigateur/IP-cam sur l'écran. Laisse la ligne `h264_hp:`
@@ -238,12 +238,10 @@ button:
     name: "Appeler"
     on_press:
       - webrtc.start: rtc
-      - switch.turn_on: lvgl_display_enable_switch
   - platform: template
     name: "Raccrocher"
     on_press:
       - webrtc.stop: rtc
-      - switch.turn_off: lvgl_display_enable_switch
 # ============================================================================
 # AUDIO FULL-DUPLEX — notre composant fdaudio (Espressif natif)
 # ============================================================================
@@ -318,14 +316,9 @@ esp_cam_sensor:
   ppa_enabled: false    # PPA
 
       
-# ============================================================================
-# Display LVGL avec caméra
-# ============================================================================  
-lvgl_camera_display:
-  id: camera_display
-  camera_id: tab5_cam
-  canvas_id: camera_canvas
-  update_interval: 33ms    # LDO du PHY MIPI-DSI (P4)
+# UN SEUL canvas par P4 (le correspondant). On N'AFFICHE PAS l'auto-aperçu local
+# (lvgl_camera_display retiré) : deux pipelines vidéo sur un P4 = trop lourd. La
+# caméra tourne quand même pour l'ENVOI (le composant webrtc la démarre lui-même).
 color:
 
   - id: color_sky_blue
@@ -417,15 +410,6 @@ switch:
       pi4ioe5v6408: pi4ioe1
       number: 2
  
-  - platform: template
-    name: "Aperçu caméra locale"
-    id: lvgl_display_enable_switch
-    restore_mode: RESTORE_DEFAULT_OFF
-    optimistic: true
-    turn_on_action:
-      - lambda: 'id(camera_display).set_enabled(true);'
-    turn_off_action:
-      - lambda: 'id(camera_display).set_enabled(false);'
   #- platform: gpio
     #id: interrupt_pin_toushsreen
     #name: "interrupt_pin_toushscreen"
@@ -580,8 +564,7 @@ lvgl:
       bg_color: ${col_bg}
       on_load:
         - lambda: |-
-            // Relier les deux canvas à leur composant (une fois les widgets créés)
-            id(camera_display).configure_canvas(id(camera_canvas));
+            // Un seul canvas : celui du correspondant.
             id(rtc).set_remote_canvas(id(remote_canvas));
       widgets:
         # ---------- Vidéo du correspondant : PLEIN ÉCRAN 1280x720 ----------
@@ -629,20 +612,6 @@ lvgl:
                   text_color: ${col_text2}
                   text_font: f_18
 
-        # ---------- Auto-aperçu (caméra locale) — médaillon bas-droite ----------
-        - canvas:
-            id: camera_canvas
-            x: 944
-            y: 508
-            width: 320
-            height: 196
-            bg_color: 0x000000
-            bg_opa: COVER
-            border_width: 2
-            border_color: ${col_panel}
-            radius: 8
-            pad_all: 0
-
         # ---------- Boutons superposés (bas-gauche) ----------
         - button:
             id: btn_call
@@ -656,7 +625,6 @@ lvgl:
             radius: 14
             on_click:
               - webrtc.start: rtc
-              - switch.turn_on: lvgl_display_enable_switch
               - lvgl.label.update:
                   id: call_status
                   text: "● Appel en cours…"
@@ -679,7 +647,6 @@ lvgl:
             radius: 14
             on_click:
               - webrtc.stop: rtc
-              - switch.turn_off: lvgl_display_enable_switch
               - lvgl.label.update:
                   id: call_status
                   text: "● En attente"
