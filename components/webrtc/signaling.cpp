@@ -7,6 +7,9 @@
 #include <cstring>
 #include <cstdlib>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 extern "C" {
 #include "esp_http_client.h"
 #include "esp_websocket_client.h"
@@ -30,26 +33,38 @@ static esp_err_t http_evt_(esp_http_client_event_t *evt) {
 
 static std::string http_post_(const std::string &url, const std::string &body) {
   std::string out;
-  esp_http_client_config_t cfg = {};
-  cfg.url = url.c_str();
-  cfg.method = HTTP_METHOD_POST;
-  cfg.timeout_ms = 10000;
-  cfg.event_handler = http_evt_;
-  cfg.user_data = &out;
-  cfg.crt_bundle_attach = esp_crt_bundle_attach;
-  esp_http_client_handle_t c = esp_http_client_init(&cfg);
-  if (c == nullptr) {
-    return out;
+  // The public signaling server (and the P4's HTTPS stack under load, e.g. while
+  // the camera inits) throw transient ESP_ERR_HTTP_CONNECT / timeouts. A couple
+  // of quick retries with backoff turns most of those into a success instead of
+  // silently dropping an offer/answer/candidate and failing the whole call.
+  for (int attempt = 1; attempt <= 3; attempt++) {
+    out.clear();
+    esp_http_client_config_t cfg = {};
+    cfg.url = url.c_str();
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = 10000;
+    cfg.event_handler = http_evt_;
+    cfg.user_data = &out;
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    if (c == nullptr) {
+      return out;
+    }
+    esp_http_client_set_header(c, "Content-Type", "application/json");
+    if (!body.empty()) {
+      esp_http_client_set_post_field(c, body.c_str(), body.size());
+    }
+    esp_err_t err = esp_http_client_perform(c);
+    esp_http_client_cleanup(c);
+    if (err == ESP_OK) {
+      return out;
+    }
+    ESP_LOGW(TAG, "POST %s failed (attempt %d/3): %s", url.c_str(), attempt,
+             esp_err_to_name(err));
+    if (attempt < 3) {
+      vTaskDelay(pdMS_TO_TICKS(500 * attempt));  // 0.5 s, then 1 s
+    }
   }
-  esp_http_client_set_header(c, "Content-Type", "application/json");
-  if (!body.empty()) {
-    esp_http_client_set_post_field(c, body.c_str(), body.size());
-  }
-  esp_err_t err = esp_http_client_perform(c);
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "POST %s failed: %s", url.c_str(), esp_err_to_name(err));
-  }
-  esp_http_client_cleanup(c);
   return out;
 }
 
