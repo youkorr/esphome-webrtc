@@ -934,6 +934,11 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
+    const bool dbg1 = (self->video_tx_count_ == 0);  // trace the very first frame
+    if (dbg1)
+      ESP_LOGI(TAG, "1st frame: got %dx%d rgb=%p, yuv_buf=%p (%u), out=%p (%u), enc %ux%u",
+               w, h, rgb, self->yuv_buf_, (unsigned) self->yuv_buf_size_, self->h264_buf_,
+               (unsigned) self->h264_buf_size_, self->enc_w_, self->enc_h_);
 
     // PPA: RGB565 (w x h) -> scale to (enc_w x enc_h). For H.264 also convert to
     // YUV420 (the encoder's native layout); for MJPEG keep RGB565 (the HW JPEG
@@ -954,6 +959,8 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
     srm.scale_x = (float) self->enc_w_ / (float) w;
     srm.scale_y = (float) self->enc_h_ / (float) h;
     srm.mode = PPA_TRANS_MODE_BLOCKING;
+    if (dbg1)
+      ESP_LOGI(TAG, "1st frame: calling PPA...");
     esp_err_t pe = ppa_do_scale_rotate_mirror(static_cast<ppa_client_handle_t>(self->ppa_), &srm);
     cam->release_buffer(fb);  // done with the camera frame
     if (pe != ESP_OK) {
@@ -962,6 +969,8 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
       vTaskDelay(pdMS_TO_TICKS(frame_ms));
       continue;
     }
+    if (dbg1)
+      ESP_LOGI(TAG, "1st frame: PPA ok, encoding...");
 
     uint32_t enc_len = 0;
     int frame_type = 0;
