@@ -1465,12 +1465,14 @@ void WebRTCComponent::start() {
     // video is best-effort, audio must never be starved. At equal priority the
     // H.264 encode round-robins with fdaudio_spk/mic and underruns the I2S TX
     // ("channel not enabled"); lower priority lets audio always preempt it.
-    // 24 KB: we now call the camera's capture_frame() on THIS task (sole-consumer
+    // 40 KB: we call the camera's capture_frame() on THIS task (sole-consumer
     // mode). capture_frame() is stack-heavy (V4L2 ioctl structs, the first-frame
-    // ESP_LOGI block, and its internal PPA transform) and previously ran on
-    // lvgl_camera_display's larger task; on the old 8 KB stack it overflowed and
-    // crashed with an "Instruction access fault" right at "First frame captured".
-    xTaskCreatePinnedToCore(video_tx_fn_, "webrtc_vtx", 24576, this, 3,
+    // ESP_LOGI block, AND its internal PPA transform, which is heavier when the
+    // camera does rotation/mirror) and previously ran on lvgl_camera_display's
+    // larger task. On 8 KB it overflowed and crashed with an "Instruction access
+    // fault" right at "First frame captured"; 24 KB still overflowed on the
+    // rotating (Waveshare) config, so give it a generous 40 KB.
+    xTaskCreatePinnedToCore(video_tx_fn_, "webrtc_vtx", 40960, this, 3,
                             reinterpret_cast<TaskHandle_t *>(&this->video_tx_task_), 1);
     const char *vc = (this->video_codec_ == VIDEO_CODEC_MJPEG) ? "MJPEG" : "H.264";
     ESP_LOGI(TAG, "video bridge ready (camera -> %s %ux%u @%ufps)", vc, this->video_w_,
