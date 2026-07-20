@@ -775,18 +775,25 @@ bool WebRTCComponent::open_video_encoder_() {
   }
 
   if (mjpeg) {
-    // MJPEG: PPA emits RGB565 (scaled) straight into the HW JPEG encoder input,
-    // then the encoder writes the JPEG bitstream. The PPA OUTPUT buffer must be
-    // 64-byte (cache-line) aligned in address AND size, which jpeg_alloc_encoder_mem
-    // does NOT guarantee ("out.buffer addr not aligned to cache line size").
-    // Use heap_caps_aligned_alloc(64,...) like the H.264 path (DMA-capable PSRAM,
-    // valid as both the PPA output and the JPEG encoder input).
-    this->yuv_buf_size_ = (size_t) this->enc_w_ * this->enc_h_ * 2;   // RGB565 in
-    this->h264_buf_size_ = (size_t) this->enc_w_ * this->enc_h_ * 2;  // JPEG out cap
+    // MJPEG: PPA emits RGB565 (scaled) into the HW JPEG encoder input, then the
+    // encoder writes the JPEG bitstream.
+    //  - INPUT (= PPA output): must be 64-byte cache-line aligned for the PPA,
+    //    which jpeg_alloc_encoder_mem does NOT guarantee. Use heap_caps_aligned_
+    //    alloc(64,...); a DMA-capable 64-aligned PSRAM buffer is a valid JPEG
+    //    encoder input too.
+    //  - OUTPUT: MUST come from jpeg_alloc_encoder_mem. Its 2D-DMA descriptors
+    //    require that exact allocation; a plain heap_caps buffer here crashed
+    //    inside jpeg_encoder_process ("Instruction access fault" on frame 1). The
+    //    PPA never touches the output, so there is no alignment conflict here.
+    this->yuv_buf_size_ = (size_t) this->enc_w_ * this->enc_h_ * 2;  // RGB565 in
     this->yuv_buf_ =
         heap_caps_aligned_alloc(64, this->yuv_buf_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    jpeg_encode_memory_alloc_cfg_t omcfg = {};
+    omcfg.buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER;
+    size_t got_out = 0;
     this->h264_buf_ =
-        heap_caps_aligned_alloc(64, this->h264_buf_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        jpeg_alloc_encoder_mem((size_t) this->enc_w_ * this->enc_h_ * 2, &omcfg, &got_out);
+    this->h264_buf_size_ = got_out;
     if (this->yuv_buf_ == nullptr || this->h264_buf_ == nullptr) {
       ESP_LOGE(TAG, "JPEG enc buffers alloc failed (in=%u out=%u)",
                (unsigned) this->yuv_buf_size_, (unsigned) this->h264_buf_size_);
@@ -889,7 +896,6 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
   const bool mjpeg = (self->video_codec_ == VIDEO_CODEC_MJPEG);
   const uint32_t frame_ms = 1000 / (self->video_fps_ > 0 ? self->video_fps_ : 15);
   uint32_t pts = 0;
-  bool warmup_done = false;
 
   // The camera is shared with LVGL; start_streaming() is idempotent.
   if (cam != nullptr && !cam->is_streaming())
@@ -903,19 +909,6 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
     const bool enc_ready = mjpeg ? (self->jenc_ != nullptr) : (self->venc_ != nullptr);
     if (!enc_ready && !self->open_video_encoder_()) {
       vTaskDelay(pdMS_TO_TICKS(500));
-      continue;
-    }
-    if (!warmup_done) {
-      // 'connected' fires the audio bridge (fdaudio init) on the main loop at the
-      // SAME instant this task would start hammering the shared core-1 / PSRAM /
-      // DMA path (camera capture + PPA + JPEG). Starting both at once raced into a
-      // "Store access fault" on the first frame. Let audio settle first, and log
-      // free PSRAM to catch an out-of-memory buffer (the other suspect).
-      ESP_LOGI(TAG, "video warmup: free PSRAM=%u B, largest block=%u B",
-               (unsigned) heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-               (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
-      vTaskDelay(pdMS_TO_TICKS(1500));
-      warmup_done = true;
       continue;
     }
     uint32_t t0 = millis();
