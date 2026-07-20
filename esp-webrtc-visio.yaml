@@ -175,12 +175,12 @@ webrtc:
   auto_start: false
   ice_servers:
     - url: "stun:stun.l.google.com:19302"
-    # TURN openrelay DÉSACTIVÉ : relais public gratuit instable, ses candidats
-    # "relay" font échouer la négociation ICE ("connect failed" avec, OK sans).
-    # Pour du maison-à-maison via Internet (CGNAT), mets TON propre TURN ici.
-    # - url: "turn:ton-serveur:3478"
-    #   username: "user"
-    #   password: "secret"
+    # TON coturn (Unraid, br0, IP LAN 192.168.1.12). Voir coturn/turnserver.conf.
+    # LAN pour ce test. Pour le maison-à-maison, remplace 192.168.1.12 par ton
+    # IP PUBLIQUE (86.206.231.111) une fois la Livebox configurée (redirections).
+    - url: "turn:192.168.1.12:3478"
+      username: "esp32"
+      password: "esp32pass"
   on_paired:
     - lvgl.label.update:
         id: call_status
