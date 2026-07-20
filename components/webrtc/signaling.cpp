@@ -48,7 +48,14 @@ static std::string http_post_(const std::string &url, const std::string &body,
     cfg.timeout_ms = 10000;
     cfg.event_handler = http_evt_;
     cfg.user_data = &out;
-    cfg.crt_bundle_attach = esp_crt_bundle_attach;  // ignored for http:// URLs
+    // Force the transport from the scheme: http:// -> plain TCP, https:// -> TLS.
+    // Attaching the cert bundle unconditionally made the client try TLS against
+    // our plain-HTTP self-hosted server ("esp-tls ... Connection reset by peer").
+    const bool is_https = url.rfind("https://", 0) == 0;
+    cfg.transport_type = is_https ? HTTP_TRANSPORT_OVER_SSL : HTTP_TRANSPORT_OVER_TCP;
+    if (is_https) {
+      cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
     if (c == nullptr) {
       return out;
@@ -85,7 +92,11 @@ static std::string http_get_(const std::string &url, const std::string &token) {
     cfg.timeout_ms = 8000;
     cfg.event_handler = http_evt_;
     cfg.user_data = &out;
-    cfg.crt_bundle_attach = esp_crt_bundle_attach;  // ignored for http:// URLs
+    const bool is_https = url.rfind("https://", 0) == 0;
+    cfg.transport_type = is_https ? HTTP_TRANSPORT_OVER_SSL : HTTP_TRANSPORT_OVER_TCP;
+    if (is_https) {
+      cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
     if (c == nullptr) {
       return out;
