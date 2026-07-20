@@ -909,7 +909,7 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
     // consumer (drive_camera_). If lvgl_camera_display is present (self-view) it
     // already dequeues frames; a second DQBUF/QBUF on the same fd from here
     // corrupts the buffers. In that case we only READ the current buffer below.
-    if (this->drive_camera_ && !cam->capture_frame()) {
+    if (self->drive_camera_ && !cam->capture_frame()) {
       vTaskDelay(pdMS_TO_TICKS(5));
       continue;
     }
