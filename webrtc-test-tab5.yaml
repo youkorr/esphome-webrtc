@@ -202,9 +202,14 @@ webrtc:
   auto_start: false
   ice_servers:
     - url: "stun:stun.l.google.com:19302"
-    - url: "turn:openrelay.metered.ca:80"
-      username: "openrelayproject"
-      password: "openrelayproject"
+    # TURN openrelay DÉSACTIVÉ : ce relais public gratuit est instable et ses
+    # candidats "relay" font échouer/traîner la négociation ICE (constaté :
+    # "connect failed" avec, connexion OK sans). Sur le MÊME réseau, STUN suffit.
+    # Pour du maison-à-maison via Internet (CGNAT), remplace-le par TON propre
+    # TURN (coturn sur VPS, ou metered.ca payant) avec identifiants.
+    # - url: "turn:ton-serveur:3478"
+    #   username: "user"
+    #   password: "secret"
   on_paired:
     - lvgl.label.update:
         id: call_status

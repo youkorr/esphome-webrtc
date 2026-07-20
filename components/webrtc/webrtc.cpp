@@ -274,6 +274,13 @@ void WebRTCComponent::send_local_signal_(int msg_type, const uint8_t *data, int 
 void WebRTCComponent::on_audio_frame_(const uint8_t *data, int size) {
   if (this->spk_ == nullptr || size <= 0)
     return;
+  // Runs on the webrtc_peer task. Drop frames until the main loop has fully
+  // brought up the speaker (bridge_active_). Otherwise the first frame calls
+  // spk_->play() here while start_audio_bridge_() is mid spk_->start() on the
+  // main loop; fdaudio then inits its full-duplex engine from two tasks at once
+  // -> corrupted state -> "Instruction access fault" crash right after connect.
+  if (!this->bridge_active_.load(std::memory_order_acquire))
+    return;
 #ifdef USE_ESP_WEBRTC_OPUS
   if (this->audio_codec_ == AUDIO_CODEC_OPUS && this->opus_dec_ != nullptr &&
       this->opus_pcm_out_ != nullptr) {
@@ -898,11 +905,11 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
       continue;
     }
     uint32_t t0 = millis();
-    // We are the sole camera consumer (the one-canvas UI has no
-    // lvgl_camera_display), so nothing else drives the V4L2 capture. Dequeue a
-    // fresh frame ourselves — this advances current_buffer_index_, without
-    // which get_current_rgb_frame() reports "no buffer available".
-    if (!cam->capture_frame()) {
+    // Drive the V4L2 capture ourselves ONLY when we are the sole camera
+    // consumer (drive_camera_). If lvgl_camera_display is present (self-view) it
+    // already dequeues frames; a second DQBUF/QBUF on the same fd from here
+    // corrupts the buffers. In that case we only READ the current buffer below.
+    if (this->drive_camera_ && !cam->capture_frame()) {
       vTaskDelay(pdMS_TO_TICKS(5));
       continue;
     }

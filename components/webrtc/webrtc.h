@@ -100,6 +100,7 @@ class WebRTCComponent : public Component {
   // Video bridge: share the esp_cam_sensor camera's RGB565 frames -> PPA YUV420
   // -> H.264 -> send to the peer. The camera keeps streaming for LVGL.
   void set_camera(esp_cam_sensor::MipiDSICamComponent *c) { this->camera_ = c; }
+  void set_drive_camera(bool d) { this->drive_camera_ = d; }
 
   // LVGL canvas that displays the REMOTE peer's video. Only meaningful with the
   // MJPEG codec (the P4 has no HW H.264 decoder, so ESP<->ESP video uses HW
@@ -193,7 +194,12 @@ class WebRTCComponent : public Component {
   uint32_t audio_tx_count_{0};      // frames sent to peer (throttled telemetry)
   uint32_t audio_rx_count_{0};      // frames received from peer (throttled telemetry)
   // Latched so start_audio_bridge_()/stop_audio_bridge_() run once per edge.
-  bool bridge_active_{false};
+  // Atomic: written by the main loop (start/stop_audio_bridge_), read by the
+  // webrtc_peer task in on_audio_frame_ to know the speaker is fully started
+  // before it enqueues PCM. Without this gate the first incoming frame calls
+  // spk_->play() (which lazily inits fdaudio) concurrently with the main loop's
+  // spk_->start() -> two fdaudio inits race -> instruction access fault crash.
+  std::atomic<bool> bridge_active_{false};
 
   // --- Opus audio codec (esp_audio_codec), optional & opt-in via
   // audio_codec: opus. Higher quality than G.711 (16 kHz wideband vs 8 kHz
@@ -209,6 +215,11 @@ class WebRTCComponent : public Component {
 
   // --- video bridge (esp_cam_sensor camera -> H.264 -> peer) ---
   esp_cam_sensor::MipiDSICamComponent *camera_{nullptr};
+  // true: video_tx drives the V4L2 capture itself (webrtc is the sole camera
+  // consumer). false: something else (e.g. lvgl_camera_display for a self-view)
+  // already calls capture_frame(), so we only READ the current buffer — two
+  // tasks doing VIDIOC_DQBUF/QBUF on the same fd corrupts the buffers.
+  bool drive_camera_{true};
   void *venc_{nullptr};             // esp_h264_enc_handle_t
   void *ppa_{nullptr};              // ppa_client_handle_t (RGB565 -> YUV420)
   void *yuv_buf_{nullptr};          // PPA output (YUV420) buffer

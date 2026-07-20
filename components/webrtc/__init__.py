@@ -47,6 +47,7 @@ CONF_PASSWORD = "password"
 CONF_MICROPHONE_ID = "microphone_id"
 CONF_SPEAKER_ID = "speaker_id"
 CONF_CAMERA_ID = "camera_id"
+CONF_DRIVE_CAMERA = "drive_camera"
 CONF_VIDEO = "video"
 CONF_ON_CONNECTED = "on_connected"
 CONF_ON_DISCONNECTED = "on_disconnected"
@@ -161,6 +162,10 @@ CONFIG_SCHEMA = cv.All(
             # H.264-encode (esp_h264 HW on P4), send to the peer. Only active when
             # camera_id is set. The camera keeps streaming for LVGL in parallel.
             cv.Optional(CONF_CAMERA_ID): cv.use_id(MipiDSICamComponent),
+            # true (default): webrtc drives the camera capture (sole consumer,
+            # one-canvas UI). Set false when lvgl_camera_display also uses the
+            # camera (self-view) so only one task does the V4L2 dequeue.
+            cv.Optional(CONF_DRIVE_CAMERA, default=True): cv.boolean,
             cv.Optional(CONF_ICE_SERVERS): cv.ensure_list(ICE_SERVER_SCHEMA),
             cv.Optional(CONF_ON_CONNECTED): automation.validate_automation(
                 {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(ConnectedTrigger)}
@@ -215,6 +220,7 @@ async def to_code(config):
     if CONF_CAMERA_ID in config:
         cam = await cg.get_variable(config[CONF_CAMERA_ID])
         cg.add(var.set_camera(cam))
+        cg.add(var.set_drive_camera(config[CONF_DRIVE_CAMERA]))
         # P4 hardware H.264 encoder. 1.1.x adds ESP_H264_RAW_FMT_RGB565_LE (the
         # P4 HW encoder accepts RGB565 directly); 1.0.4's enum lacked it.
         add_idf_component(name="espressif/esp_h264", ref="~1.1")
