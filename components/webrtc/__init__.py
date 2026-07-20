@@ -32,6 +32,8 @@ AUTO_LOAD = ["microphone", "speaker"]
 
 CONF_ROOM_ID = "room_id"
 CONF_ROLE = "role"
+CONF_SIGNALING_URL = "signaling_url"
+CONF_SIGNALING_TOKEN = "signaling_token"
 CONF_VIDEO_CODEC = "video_codec"
 CONF_AUDIO_CODEC = "audio_codec"
 CONF_VIDEO_DIRECTION = "video_direction"
@@ -132,6 +134,10 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(): cv.declare_id(WebRTCComponent),
             cv.Optional(CONF_ROOM_ID, default="esphome_room"): cv.string,
             cv.Optional(CONF_ROLE, default="auto"): cv.enum(PEER_ROLE, lower=True),
+            # Self-hosted signaling (signaling-server/). When set, the P4 talks to
+            # your own server (HTTP + token) instead of webrtc.espressif.com.
+            cv.Optional(CONF_SIGNALING_URL, default=""): cv.string,
+            cv.Optional(CONF_SIGNALING_TOKEN, default=""): cv.string,
             cv.Optional(CONF_VIDEO_CODEC, default="h264"): cv.enum(
                 VIDEO_CODEC, lower=True
             ),
@@ -192,6 +198,8 @@ async def to_code(config):
 
     cg.add(var.set_room_id(config[CONF_ROOM_ID]))
     cg.add(var.set_role(config[CONF_ROLE]))
+    cg.add(var.set_signaling_url(config[CONF_SIGNALING_URL]))
+    cg.add(var.set_signaling_token(config[CONF_SIGNALING_TOKEN]))
     cg.add(var.set_video_codec(config[CONF_VIDEO_CODEC]))
     cg.add(var.set_audio_codec(config[CONF_AUDIO_CODEC]))
     cg.add(var.set_video_direction(config[CONF_VIDEO_DIRECTION]))

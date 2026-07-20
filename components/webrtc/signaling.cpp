@@ -6,6 +6,7 @@
 
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -14,6 +15,7 @@ extern "C" {
 #include "esp_http_client.h"
 #include "esp_websocket_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_random.h"
 #include "cJSON.h"
 }
 
@@ -31,7 +33,8 @@ static esp_err_t http_evt_(esp_http_client_event_t *evt) {
   return ESP_OK;
 }
 
-static std::string http_post_(const std::string &url, const std::string &body) {
+static std::string http_post_(const std::string &url, const std::string &body,
+                              const std::string &token = "") {
   std::string out;
   // The public signaling server (and the P4's HTTPS stack under load, e.g. while
   // the camera inits) throw transient ESP_ERR_HTTP_CONNECT / timeouts. A couple
@@ -45,12 +48,15 @@ static std::string http_post_(const std::string &url, const std::string &body) {
     cfg.timeout_ms = 10000;
     cfg.event_handler = http_evt_;
     cfg.user_data = &out;
-    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;  // ignored for http:// URLs
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
     if (c == nullptr) {
       return out;
     }
     esp_http_client_set_header(c, "Content-Type", "application/json");
+    if (!token.empty()) {
+      esp_http_client_set_header(c, "X-Auth-Token", token.c_str());
+    }
     if (!body.empty()) {
       esp_http_client_set_post_field(c, body.c_str(), body.size());
     }
@@ -63,6 +69,37 @@ static std::string http_post_(const std::string &url, const std::string &body) {
              esp_err_to_name(err));
     if (attempt < 3) {
       vTaskDelay(pdMS_TO_TICKS(500 * attempt));  // 0.5 s, then 1 s
+    }
+  }
+  return out;
+}
+
+// GET helper for the simple backend's poll loop. Returns the response body.
+static std::string http_get_(const std::string &url, const std::string &token) {
+  std::string out;
+  for (int attempt = 1; attempt <= 2; attempt++) {
+    out.clear();
+    esp_http_client_config_t cfg = {};
+    cfg.url = url.c_str();
+    cfg.method = HTTP_METHOD_GET;
+    cfg.timeout_ms = 8000;
+    cfg.event_handler = http_evt_;
+    cfg.user_data = &out;
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;  // ignored for http:// URLs
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    if (c == nullptr) {
+      return out;
+    }
+    if (!token.empty()) {
+      esp_http_client_set_header(c, "X-Auth-Token", token.c_str());
+    }
+    esp_err_t err = esp_http_client_perform(c);
+    esp_http_client_cleanup(c);
+    if (err == ESP_OK) {
+      return out;
+    }
+    if (attempt < 2) {
+      vTaskDelay(pdMS_TO_TICKS(300));
     }
   }
   return out;
@@ -160,7 +197,106 @@ bool ApprtcSignaling::join(const std::string &signal_url) {
   return ok;
 }
 
+// --- Simple self-hosted backend -------------------------------------------
+
+bool ApprtcSignaling::join_simple() {
+  // Our own client id (the server does not assign one).
+  char idbuf[17];
+  snprintf(idbuf, sizeof(idbuf), "%08lx%08lx", (unsigned long) esp_random(),
+           (unsigned long) esp_random());
+  this->client_id_ = idbuf;
+  this->pending_msgs_.clear();
+
+  cJSON *jb = cJSON_CreateObject();
+  cJSON_AddStringToObject(jb, "client", this->client_id_.c_str());
+  char *body = cJSON_PrintUnformatted(jb);
+  cJSON_Delete(jb);
+  std::string resp = http_post_(this->simple_base_ + "/join/" + this->room_id_,
+                                body != nullptr ? body : "", this->auth_token_);
+  if (body != nullptr) {
+    free(body);
+  }
+  if (resp.empty()) {
+    ESP_LOGE(TAG, "simple join: no/failed response from %s", this->simple_base_.c_str());
+    return false;
+  }
+  cJSON *root = cJSON_Parse(resp.c_str());
+  if (root == nullptr) {
+    ESP_LOGE(TAG, "simple join: cannot parse response");
+    return false;
+  }
+  cJSON *it = cJSON_GetObjectItem(root, "initiator");
+  if (it != nullptr) {
+    this->is_initiator_ = cJSON_IsTrue(it);
+  }
+  cJSON *messages = cJSON_GetObjectItem(root, "messages");
+  if (messages != nullptr && cJSON_IsArray(messages)) {
+    int n = cJSON_GetArraySize(messages);
+    for (int i = 0; i < n; i++) {
+      cJSON *m = cJSON_GetArrayItem(messages, i);
+      if (m != nullptr && cJSON_IsString(m) && m->valuestring != nullptr) {
+        this->pending_msgs_.emplace_back(m->valuestring);
+      }
+    }
+  }
+  cJSON_Delete(root);
+  ESP_LOGI(TAG, "simple signaling joined: room=%s client=%s initiator=%s",
+           this->room_id_.c_str(), this->client_id_.c_str(),
+           this->is_initiator_ ? "yes" : "no");
+  return true;
+}
+
+void ApprtcSignaling::poll_once_() {
+  std::string resp = http_get_(this->msg_url_(), this->auth_token_);
+  if (resp.empty()) {
+    return;
+  }
+  cJSON *root = cJSON_Parse(resp.c_str());
+  if (root == nullptr) {
+    return;
+  }
+  cJSON *msgs = cJSON_GetObjectItem(root, "messages");
+  if (msgs != nullptr && cJSON_IsArray(msgs)) {
+    int n = cJSON_GetArraySize(msgs);
+    for (int i = 0; i < n; i++) {
+      cJSON *m = cJSON_GetArrayItem(msgs, i);
+      if (m != nullptr && cJSON_IsString(m) && m->valuestring != nullptr) {
+        this->handle_ws_text_(m->valuestring, static_cast<int>(strlen(m->valuestring)));
+      }
+    }
+  }
+  cJSON_Delete(root);
+}
+
+void ApprtcSignaling::poll_fn_(void *arg) {
+  auto *self = static_cast<ApprtcSignaling *>(arg);
+  self->poll_task_done_ = false;
+  while (self->poll_run_) {
+    self->poll_once_();
+    vTaskDelay(pdMS_TO_TICKS(300));
+  }
+  self->poll_task_done_ = true;
+  self->poll_task_ = nullptr;
+  vTaskDelete(nullptr);
+}
+
+// --- AppRTC backend --------------------------------------------------------
+
 bool ApprtcSignaling::connect() {
+  if (this->simple_mode_) {
+    // Start the GET-poll loop, then replay anything already queued (the peer's
+    // offer if it joined first). 12 KB stack: HTTP GET + cJSON parse of a ~2 KB
+    // SDP.
+    this->poll_run_ = true;
+    this->poll_task_done_ = false;
+    xTaskCreate(poll_fn_, "sig_poll", 12288, this, 4,
+                reinterpret_cast<TaskHandle_t *>(&this->poll_task_));
+    for (auto &m : this->pending_msgs_) {
+      this->handle_ws_text_(m.c_str(), static_cast<int>(m.size()));
+    }
+    this->pending_msgs_.clear();
+    return true;
+  }
   // The AppRTC server checks the Origin header (403 without it); store it in a
   // member so it outlives esp_websocket_client_start.
   this->origin_ = "Origin: " + this->base_url_ + "\r\n";
@@ -249,7 +385,7 @@ void ApprtcSignaling::handle_ws_text_(const char *text, int len) {
 }
 
 void ApprtcSignaling::send_sdp(const std::string &sdp) {
-  if (this->message_url_.empty()) {
+  if (!this->simple_mode_ && this->message_url_.empty()) {
     return;
   }
   cJSON *j = cJSON_CreateObject();
@@ -260,13 +396,17 @@ void ApprtcSignaling::send_sdp(const std::string &sdp) {
   if (payload != nullptr) {
     ESP_LOGD(TAG, "send local %s (%u bytes)", this->is_initiator_ ? "offer" : "answer",
              (unsigned) sdp.size());
-    http_post_(this->message_url_, payload);
+    if (this->simple_mode_) {
+      http_post_(this->msg_url_(), payload, this->auth_token_);
+    } else {
+      http_post_(this->message_url_, payload);
+    }
     free(payload);
   }
 }
 
 void ApprtcSignaling::send_candidate(const std::string &candidate) {
-  if (this->message_url_.empty()) {
+  if (!this->simple_mode_ && this->message_url_.empty()) {
     return;
   }
   cJSON *j = cJSON_CreateObject();
@@ -275,12 +415,30 @@ void ApprtcSignaling::send_candidate(const std::string &candidate) {
   char *payload = cJSON_PrintUnformatted(j);
   cJSON_Delete(j);
   if (payload != nullptr) {
-    http_post_(this->message_url_, payload);
+    if (this->simple_mode_) {
+      http_post_(this->msg_url_(), payload, this->auth_token_);
+    } else {
+      http_post_(this->message_url_, payload);
+    }
     free(payload);
   }
 }
 
 void ApprtcSignaling::stop() {
+  if (this->simple_mode_) {
+    // Stop the poll loop and wait for it to exit (it uses this object).
+    this->poll_run_ = false;
+    for (int i = 0; i < 100 && !this->poll_task_done_; i++) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (!this->client_id_.empty()) {
+      http_post_(this->simple_base_ + "/leave/" + this->room_id_ + "/" + this->client_id_,
+                 "", this->auth_token_);
+    }
+    this->client_id_.clear();
+    this->pending_msgs_.clear();
+    return;
+  }
   // Tell the room we are leaving so the server frees our slot; otherwise a
   // re-join to the SAME room sees it as full (2 clients) and mis-assigns the
   // offerer/answerer role. AppRTC: POST <base>/leave/<room>/<client>.

@@ -43,6 +43,21 @@ class ApprtcSignaling {
   // AppRTC join order (which flips when a crashed peer leaves a ghost in the room).
   void force_initiator(bool v) { this->is_initiator_ = v; }
 
+  // --- Self-hosted "simple" backend (our signaling-server/, HTTP + polling) ---
+  // When a base URL is set, the client speaks our minimal protocol instead of
+  // AppRTC: POST /join, POST /msg (send), GET /msg (poll), POST /leave, each with
+  // an X-Auth-Token header. No WebSocket, no port 8089, works over plain HTTP.
+  void set_simple_backend(const std::string &base_url, const std::string &token) {
+    this->simple_base_ = base_url;
+    this->auth_token_ = token;
+    this->simple_mode_ = !base_url.empty();
+  }
+  bool is_simple() const { return this->simple_mode_; }
+  void set_room(const std::string &room) { this->room_id_ = room; }
+  bool join_simple();
+  static void poll_fn_(void *arg);
+  void poll_once_();
+
   // Invoked from the (static) websocket event handler in signaling.cpp.
   void on_ws_connected_();
   void handle_ws_text_(const char *text, int len);
@@ -57,6 +72,17 @@ class ApprtcSignaling {
   std::vector<std::string> pending_msgs_;  // queued room messages, replayed in connect()
   bool is_initiator_{false};
   void *ws_{nullptr};  // esp_websocket_client_handle_t
+
+  // Simple self-hosted backend state.
+  bool simple_mode_{false};
+  std::string simple_base_;   // e.g. "http://192.168.1.12:8080" (no trailing slash)
+  std::string auth_token_;    // X-Auth-Token value
+  volatile bool poll_run_{false};
+  volatile bool poll_task_done_{true};
+  void *poll_task_{nullptr};  // TaskHandle_t of the GET-poll loop
+  std::string msg_url_() const {
+    return this->simple_base_ + "/msg/" + this->room_id_ + "/" + this->client_id_;
+  }
 };
 
 }  // namespace webrtc

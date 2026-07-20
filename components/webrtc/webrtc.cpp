@@ -1373,16 +1373,25 @@ void WebRTCComponent::start() {
     return;
   }
   // 1) Join the room first, so we know whether we offer or answer.
-  // Retry a few times: the AppRTC room holds only 2 slots, and a crashed/rebooted
-  // peer can leave a ghost that makes the join look "full" (no client_id) until
-  // the server expires it or the real peer leaves. A short retry rides that out.
+  // Retry a few times: a crashed/rebooted peer can leave a ghost that makes the
+  // join look "full" until the server expires it. A short retry rides that out.
+  const bool simple = !this->signaling_url_.empty();
+  if (simple) {
+    this->signaling_.set_simple_backend(this->signaling_url_, this->signaling_token_);
+    this->signaling_.set_room(this->room_id_);
+    ESP_LOGI(TAG, "Joining self-hosted signaling: %s room=%s", this->signaling_url_.c_str(),
+             this->room_id_.c_str());
+  } else {
+    ESP_LOGI(TAG, "Joining signaling room: https://webrtc.espressif.com/join/%s",
+             this->room_id_.c_str());
+  }
   std::string url = "https://webrtc.espressif.com/join/" + this->room_id_;
-  ESP_LOGI(TAG, "Joining signaling room: %s", url.c_str());
   bool joined = false;
   for (int attempt = 1; attempt <= 3 && !joined; attempt++) {
-    joined = this->signaling_.join(url);
+    joined = simple ? this->signaling_.join_simple() : this->signaling_.join(url);
     if (!joined && attempt < 3) {
-      ESP_LOGW(TAG, "join attempt %d failed (room busy/ghost client?); retrying in 3s", attempt);
+      ESP_LOGW(TAG, "join attempt %d failed (room busy/ghost or server down?); retrying in 3s",
+               attempt);
       vTaskDelay(pdMS_TO_TICKS(3000));
     }
   }

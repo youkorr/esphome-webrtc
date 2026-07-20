@@ -73,6 +73,10 @@ class WebRTCComponent : public Component {
 
   void set_room_id(const std::string &r) { this->room_id_ = r; }
   void set_role(PeerRole r) { this->role_ = r; }
+  // Self-hosted signaling (our signaling-server/). When set, the P4 uses the
+  // simple HTTP+token backend instead of the public AppRTC server.
+  void set_signaling_url(const std::string &u) { this->signaling_url_ = u; }
+  void set_signaling_token(const std::string &t) { this->signaling_token_ = t; }
   void set_video_codec(VideoCodec c) { this->video_codec_ = c; }
   void set_audio_codec(AudioCodec c) { this->audio_codec_ = c; }
   void set_video_direction(MediaDir d) { this->video_dir_ = d; }
@@ -161,6 +165,8 @@ class WebRTCComponent : public Component {
   void on_mic_data_(const std::vector<uint8_t> &data);  // mic cb -> ring buffer
 
   std::string room_id_{"esphome_room"};
+  std::string signaling_url_;    // empty = public AppRTC; set = self-hosted simple backend
+  std::string signaling_token_;  // X-Auth-Token for the self-hosted backend
   PeerRole role_{ROLE_AUTO};
   VideoCodec video_codec_{VIDEO_CODEC_H264};
   AudioCodec audio_codec_{AUDIO_CODEC_OPUS};

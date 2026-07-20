@@ -187,6 +187,10 @@ webrtc:
                               # Le Waveshare doit être en role: callee.
                               # Ainsi le rôle ne dépend plus de l'ordre de
                               # démarrage ni d'un client fantôme dans la room.
+  # Signaling auto-hébergé (voir signaling-server/). Décommente pour ne plus
+  # dépendre de webrtc.espressif.com. MÊME url + token sur les deux P4.
+  # signaling_url: "http://192.168.1.12:8080"
+  # signaling_token: "change-moi-secret-partage"
   video_codec: mjpeg          # JPEG matériel encode+decode (P4<->P4)
   audio_codec: opus           # 16 kHz large bande (P4<->P4)
   video_direction: sendrecv   # envoie ET reçoit la vidéo
