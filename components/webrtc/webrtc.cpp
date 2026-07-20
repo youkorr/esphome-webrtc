@@ -889,6 +889,7 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
   const bool mjpeg = (self->video_codec_ == VIDEO_CODEC_MJPEG);
   const uint32_t frame_ms = 1000 / (self->video_fps_ > 0 ? self->video_fps_ : 15);
   uint32_t pts = 0;
+  bool warmup_done = false;
 
   // The camera is shared with LVGL; start_streaming() is idempotent.
   if (cam != nullptr && !cam->is_streaming())
@@ -902,6 +903,19 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
     const bool enc_ready = mjpeg ? (self->jenc_ != nullptr) : (self->venc_ != nullptr);
     if (!enc_ready && !self->open_video_encoder_()) {
       vTaskDelay(pdMS_TO_TICKS(500));
+      continue;
+    }
+    if (!warmup_done) {
+      // 'connected' fires the audio bridge (fdaudio init) on the main loop at the
+      // SAME instant this task would start hammering the shared core-1 / PSRAM /
+      // DMA path (camera capture + PPA + JPEG). Starting both at once raced into a
+      // "Store access fault" on the first frame. Let audio settle first, and log
+      // free PSRAM to catch an out-of-memory buffer (the other suspect).
+      ESP_LOGI(TAG, "video warmup: free PSRAM=%u B, largest block=%u B",
+               (unsigned) heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+               (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+      vTaskDelay(pdMS_TO_TICKS(1500));
+      warmup_done = true;
       continue;
     }
     uint32_t t0 = millis();

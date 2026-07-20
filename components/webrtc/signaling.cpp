@@ -56,6 +56,9 @@ static std::string http_post_(const std::string &url, const std::string &body,
     if (is_https) {
       cfg.crt_bundle_attach = esp_crt_bundle_attach;
     }
+    if (!token.empty()) {
+      ESP_LOGD(TAG, "signaling POST via %s: %s", is_https ? "TLS" : "TCP", url.c_str());
+    }
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
     if (c == nullptr) {
       return out;
