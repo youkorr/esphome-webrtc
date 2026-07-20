@@ -72,7 +72,15 @@ def _purge_locked(room):
         _rooms.pop(room, None)  # plus personne -> on oublie le journal
 
 
+class Server(ThreadingHTTPServer):
+    daemon_threads = True       # les threads de requête ne bloquent pas l'arrêt
+    request_queue_size = 128    # backlog TCP large (rafales de connexions du P4)
+    allow_reuse_address = True
+
+
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"  # Content-Length fourni -> connexions propres
+
     def log_message(self, fmt, *args):
         pass  # on gère nos propres logs
 
@@ -191,7 +199,7 @@ def main():
               "protection. Définis la variable d'environnement SIGNALING_TOKEN.",
               flush=True)
         raise SystemExit(1)
-    srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    srv = Server(("0.0.0.0", PORT), Handler)
     print("Signaling ESP32-P4 démarré sur 0.0.0.0:%d (TTL pair=%ds)"
           % (PORT, TTL), flush=True)
     try:

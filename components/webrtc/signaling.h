@@ -3,6 +3,7 @@
 #include "esphome/core/helpers.h"
 
 #include <functional>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -80,6 +81,11 @@ class ApprtcSignaling {
   volatile bool poll_run_{false};
   volatile bool poll_task_done_{true};
   void *poll_task_{nullptr};  // TaskHandle_t of the GET-poll loop
+  // Outgoing messages are queued here by send_sdp/send_candidate (called from the
+  // webrtc_peer task) and actually POSTed by the poll task, so the P4 never opens
+  // two TCP connections at once (concurrent send + poll got reset by the peer).
+  std::vector<std::string> outbox_;
+  std::mutex outbox_mtx_;
   std::string msg_url_() const {
     return this->simple_base_ + "/msg/" + this->room_id_ + "/" + this->client_id_;
   }

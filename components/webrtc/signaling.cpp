@@ -286,6 +286,18 @@ void ApprtcSignaling::poll_fn_(void *arg) {
   auto *self = static_cast<ApprtcSignaling *>(arg);
   self->poll_task_done_ = false;
   while (self->poll_run_) {
+    // 1) Send anything queued by send_sdp/send_candidate. Done here (not on the
+    //    peer task) so only ONE TCP connection to the server is ever open at a
+    //    time — two concurrent connects were being reset by the peer.
+    std::vector<std::string> pending;
+    {
+      std::lock_guard<std::mutex> lk(self->outbox_mtx_);
+      pending.swap(self->outbox_);
+    }
+    for (auto &p : pending) {
+      http_post_(self->msg_url_(), p, self->auth_token_);
+    }
+    // 2) Fetch incoming messages.
     self->poll_once_();
     vTaskDelay(pdMS_TO_TICKS(300));
   }
@@ -411,7 +423,9 @@ void ApprtcSignaling::send_sdp(const std::string &sdp) {
     ESP_LOGD(TAG, "send local %s (%u bytes)", this->is_initiator_ ? "offer" : "answer",
              (unsigned) sdp.size());
     if (this->simple_mode_) {
-      http_post_(this->msg_url_(), payload, this->auth_token_);
+      // Queue it; the poll task will POST it (single connection at a time).
+      std::lock_guard<std::mutex> lk(this->outbox_mtx_);
+      this->outbox_.emplace_back(payload);
     } else {
       http_post_(this->message_url_, payload);
     }
@@ -430,7 +444,8 @@ void ApprtcSignaling::send_candidate(const std::string &candidate) {
   cJSON_Delete(j);
   if (payload != nullptr) {
     if (this->simple_mode_) {
-      http_post_(this->msg_url_(), payload, this->auth_token_);
+      std::lock_guard<std::mutex> lk(this->outbox_mtx_);
+      this->outbox_.emplace_back(payload);
     } else {
       http_post_(this->message_url_, payload);
     }
@@ -444,6 +459,10 @@ void ApprtcSignaling::stop() {
     this->poll_run_ = false;
     for (int i = 0; i < 100 && !this->poll_task_done_; i++) {
       vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    {
+      std::lock_guard<std::mutex> lk(this->outbox_mtx_);
+      this->outbox_.clear();
     }
     if (!this->client_id_.empty()) {
       http_post_(this->simple_base_ + "/leave/" + this->room_id_ + "/" + this->client_id_,
