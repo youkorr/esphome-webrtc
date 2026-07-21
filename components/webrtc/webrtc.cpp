@@ -982,23 +982,19 @@ void WebRTCComponent::pump_mjpeg_tx_() {
   if (ew < 16 || eh < 16)
     return;
 
-  // Lazy one-time init: PPA client + fixed-size buffers + JPEG engine.
+  // Lazy one-time init: fixed-size JPEG encoder buffers + engine. NO PPA: the
+  // TX frame is scaled on the CPU (see below). On the P4 the PPA and the HW JPEG
+  // codec are both clients of the same DMA2D engine; when a device does BOTH
+  // encode (TX) and decode (RX), adding the PPA as a third DMA2D client wedges
+  // the encoder<->decoder handoff (one encode + one decode succeed, then the
+  // main loop blocks forever -> task_wdt). face2face proved a CPU scale + only
+  // the JPEG codec on DMA2D is stable both ways; we do the same.
   if (this->jenc_ == nullptr) {
-    ppa_client_config_t pcfg = {};
-    pcfg.oper_type = PPA_OPERATION_SRM;
-    if (this->ppa_ == nullptr &&
-        ppa_register_client(&pcfg, reinterpret_cast<ppa_client_handle_t *>(&this->ppa_)) != ESP_OK) {
-      ESP_LOGE(TAG, "PPA client register failed");
-      return;
-    }
     this->enc_w_ = ew;
     this->enc_h_ = eh;
-    this->yuv_buf_size_ = (size_t) ew * eh * 2;  // RGB565
-    this->yuv_buf_ =
-        heap_caps_aligned_alloc(64, this->yuv_buf_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (this->yuv_buf_ == nullptr ||
-        !ensure_jpeg_enc_buf_(&this->jpeg_in_, &this->jpeg_in_size_, this->yuv_buf_size_, true) ||
-        !ensure_jpeg_enc_buf_(&this->h264_buf_, &this->h264_buf_size_, this->yuv_buf_size_, false)) {
+    const size_t insz = (size_t) ew * eh * 2;  // RGB565 encoder input
+    if (!ensure_jpeg_enc_buf_(&this->jpeg_in_, &this->jpeg_in_size_, insz, true) ||
+        !ensure_jpeg_enc_buf_(&this->h264_buf_, &this->h264_buf_size_, insz, false)) {
       ESP_LOGE(TAG, "MJPEG buffers alloc failed (%dx%d)", ew, eh);
       return;
     }
@@ -1013,7 +1009,7 @@ void WebRTCComponent::pump_mjpeg_tx_() {
     if (ew != (int) this->video_w_ || eh != (int) this->video_h_)
       ESP_LOGW(TAG, "MJPEG size rounded to 16px: %ux%u -> %dx%d", this->video_w_, this->video_h_,
                ew, eh);
-    ESP_LOGI(TAG, "MJPEG encoder ready (main-loop), sending exactly %dx%d", ew, eh);
+    ESP_LOGI(TAG, "MJPEG encoder ready (main-loop, CPU scale), sending exactly %dx%d", ew, eh);
   }
 
   // Sole consumer: dequeue a fresh frame (else current_buffer_index_ stays -1).
@@ -1025,39 +1021,34 @@ void WebRTCComponent::pump_mjpeg_tx_() {
   if (!cam->get_current_rgb_frame(&fb, &rgb, &w, &h) || rgb == nullptr || w <= 0 || h <= 0)
     return;
 
-  // PPA: scale the camera RGB565 (w x h) to EXACTLY ew x eh (the user's size),
-  // whatever the sensor delivers.
-  ppa_srm_oper_config_t srm = {};
-  srm.in.buffer = rgb;
-  srm.in.pic_w = w;
-  srm.in.pic_h = h;
-  srm.in.block_w = w;
-  srm.in.block_h = h;
-  srm.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
-  srm.out.buffer = this->yuv_buf_;
-  srm.out.buffer_size = this->yuv_buf_size_;
-  srm.out.pic_w = ew;
-  srm.out.pic_h = eh;
-  srm.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
-  srm.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
-  srm.scale_x = (float) ew / (float) w;
-  srm.scale_y = (float) eh / (float) h;
-  srm.mode = PPA_TRANS_MODE_BLOCKING;
-  esp_err_t pe = ppa_do_scale_rotate_mirror(static_cast<ppa_client_handle_t>(this->ppa_), &srm);
-  cam->release_buffer(fb);  // PPA is blocking; camera buffer free to re-queue now
-  if (pe != ESP_OK) {
-    if (now - this->last_enc_warn_ms_ > 1000) {
-      this->last_enc_warn_ms_ = now;
-      ESP_LOGW(TAG, "PPA scale failed: %s", esp_err_to_name(pe));
+  // CPU scale the camera RGB565 (w x h) to EXACTLY ew x eh (the user's size)
+  // straight into the HW JPEG encoder's input buffer. Nearest-neighbour with a
+  // 16.16 fixed-point source walk (no per-pixel divide, no PPA -> no DMA2D
+  // contention with the JPEG decoder). Works for ANY sensor size and any target,
+  // arbitrary ratio (not just integer 1/N), so video_width/height stay exact.
+  {
+    const uint16_t *src = reinterpret_cast<const uint16_t *>(rgb);
+    uint16_t *dst = static_cast<uint16_t *>(this->jpeg_in_);
+    const uint32_t dx_fp = ((uint32_t) w << 16) / (uint32_t) ew;
+    const uint32_t dy_fp = ((uint32_t) h << 16) / (uint32_t) eh;
+    uint32_t sy_fp = 0;
+    for (int y = 0; y < eh; y++) {
+      const uint16_t *srow = src + (size_t) (sy_fp >> 16) * (size_t) w;
+      uint16_t *drow = dst + (size_t) y * (size_t) ew;
+      uint32_t sx_fp = 0;
+      for (int x = 0; x < ew; x++) {
+        drow[x] = srow[sx_fp >> 16];
+        sx_fp += dx_fp;
+      }
+      sy_fp += dy_fp;
     }
-    return;
   }
-  // PPA wrote via DMA -> make the CPU see fresh pixels, then copy into the HW
-  // JPEG encoder's own input buffer (it requires jpeg_alloc_encoder_mem memory).
-  esp_cache_msync(this->yuv_buf_, this->yuv_buf_size_,
-                  ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
-  memcpy(this->jpeg_in_, this->yuv_buf_, this->yuv_buf_size_);
-  const size_t need = this->yuv_buf_size_;
+  cam->release_buffer(fb);  // done reading the camera buffer; free it to re-queue
+  const size_t need = (size_t) ew * (size_t) eh * 2;
+  // CPU wrote jpeg_in_ (cacheable PSRAM); flush so the JPEG encoder's DMA reads
+  // fresh pixels.
+  esp_cache_msync(this->jpeg_in_, need,
+                  ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
 
   jpeg_encode_cfg_t jc = {};
   jc.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
