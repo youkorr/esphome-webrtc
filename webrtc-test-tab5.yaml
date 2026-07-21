@@ -170,11 +170,12 @@ external_components:
     components: [h264_hp]
     refresh: 0s 
 
-# edge264 n'est utile QUE pour recevoir du H.264 (navigateur/IP-cam). En P4<->P4
-# on est en MJPEG (décodage JPEG matériel), donc on le LAISSE DÉSACTIVÉ ici :
-# ça libère de la PSRAM et évite ses réglages sdkconfig. Décommente seulement
-# pour un test navigateur en video_codec: h264.
-# h264_hp:
+# edge264 = décodage H.264 (High profile) vers le canvas. OBLIGATOIRE pour
+# afficher la vidéo H.264 du correspondant (P4<->P4 en video_codec: h264).
+# L'encodeur JPEG matériel plantant, on est passé en H.264 : cette ligne doit
+# donc rester DÉCOMMENTÉE des deux côtés (sinon les frames H.264 arrivent mais
+# rien ne les décode -> pas d'image). Composant interne, aucune config.
+h264_hp:
 
 ## ===========================================================================
 ##  WEBRTC — P4 <-> P4 (MJPEG vidéo matérielle + Opus audio, 1280x720)
@@ -191,7 +192,8 @@ webrtc:
   # dépendre de webrtc.espressif.com. MÊME url + token sur les deux P4.
   # signaling_url: "http://192.168.1.12:8080"
   # signaling_token: "change-moi-secret-partage"
-  video_codec: mjpeg          # JPEG matériel encode+decode (P4<->P4)
+  video_codec: h264           # H.264 : encodeur matériel P4 + décodage edge264 (h264_hp)
+                              # (l'encodeur JPEG matériel plante, H.264 fonctionne et est réactif)
   audio_codec: opus           # 16 kHz large bande (P4<->P4)
   video_direction: sendrecv   # envoie ET reçoit la vidéo
   audio_direction: sendrecv   # envoie ET reçoit l'audio

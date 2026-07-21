@@ -142,9 +142,10 @@ external_components:
     components: [h264_hp]
     refresh: 0s
 
-# edge264 inutile en P4<->P4 (MJPEG = décodage JPEG matériel). Désactivé pour
-# libérer de la PSRAM. Décommente seulement pour un test navigateur en h264.
-# h264_hp:
+# edge264 = décodage H.264 vers le canvas. OBLIGATOIRE pour afficher la vidéo
+# H.264 du correspondant (doit rester DÉCOMMENTÉ des deux côtés). Composant
+# interne, aucune config.
+h264_hp:
 
 ## ===========================================================================
 ##  WEBRTC — WAVESHARE 1024x600, P4 <-> P4 (MJPEG + Opus)
@@ -164,7 +165,7 @@ webrtc:
   # dépendre de webrtc.espressif.com. MÊME url + token que le Tab5.
   # signaling_url: "http://192.168.1.12:8080"
   # signaling_token: "change-moi-secret-partage"
-  video_codec: mjpeg          # JPEG matériel encode+decode (P4<->P4)
+  video_codec: h264           # H.264 : encodeur matériel P4 + décodage edge264 (h264_hp)
   audio_codec: opus           # 16 kHz large bande (P4<->P4)
   video_direction: sendrecv   # envoie ET reçoit la vidéo
   audio_direction: sendrecv   # envoie ET reçoit l'audio
