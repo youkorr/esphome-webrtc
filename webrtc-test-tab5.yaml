@@ -196,8 +196,8 @@ webrtc:
   # dépendre de webrtc.espressif.com. MÊME url + token sur les deux P4.
   # signaling_url: "http://192.168.1.12:8080"
   # signaling_token: "change-moi-secret-partage"
-  video_codec: mjpeg          # MJPEG chemin face2face : capture + décimation CPU +
-                              # encodeur JPEG matériel, tout sur la boucle principale.
+  video_codec: mjpeg          # MJPEG : capture -> PPA (taille exacte) -> JPEG matériel
+                              # -> data channel, sur la boucle principale.
                               # Alternative validée : h264 (encodeur HW + edge264).
   audio_codec: opus           # 16 kHz large bande (P4<->P4)
   video_direction: sendrecv   # envoie ET reçoit la vidéo
@@ -207,8 +207,8 @@ webrtc:
   speaker_id: tab5_speaker
   microphone_id: tab5_microphone
   sample_rate: 16000
-  video_width: 1280
-  video_height: 720
+  video_width: 640            # taille EXACTE envoyée (le PPA redimensionne la caméra
+  video_height: 480           # vers ça, quelle que soit sa résolution native ; mult. de 16)
   fps: 15
   auto_start: false
   ice_servers:

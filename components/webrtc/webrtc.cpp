@@ -946,12 +946,12 @@ static bool ensure_jpeg_enc_buf_(void **buf, size_t *cap, size_t need, bool inpu
   return *buf != nullptr;
 }
 
-// MJPEG video TX on the MAIN LOOP — a faithful port of face2face's proven
-// pump_video_tx_(): drive the V4L2 capture, integer-decimate the RGB565 frame on
-// the CPU straight into the encoder's own DMA input buffer, HW-JPEG encode,
-// send. No PPA and no dedicated task: the PPA+webrtc_vtx pipeline crashed
-// deterministically on the first frame on this hardware, while this exact
-// main-loop path runs in production on the same P4s + cameras.
+// MJPEG video TX on the MAIN LOOP. Drives the V4L2 capture, PPA-scales the
+// camera frame to EXACTLY video_width x video_height (the user's choice, not the
+// sensor's native size), HW-JPEG encodes and sends over the data channel. Runs
+// on loop() (not a task) so it serialises naturally with the JPEG decode; the
+// first-frame crashes were never here — they were ops->send_video on an inactive
+// RTP m-line (proven by addr2line).
 void WebRTCComponent::pump_mjpeg_tx_() {
   if (!this->connected_.load() || this->camera_ == nullptr || !(this->video_dir_ & MEDIA_DIR_SEND_ONLY))
     return;
@@ -964,8 +964,34 @@ void WebRTCComponent::pump_mjpeg_tx_() {
   auto *cam = this->camera_;
   if (!cam->is_streaming())
     cam->start_streaming();
-  // Lazy engine, created and used only on this task (like face2face jpeg_init_).
+
+  // Target = EXACTLY what the user set in YAML, rounded down to the HW JPEG
+  // codec's 16px granularity. Independent of the sensor's native resolution.
+  const int ew = (int) this->video_w_ & ~15;
+  const int eh = (int) this->video_h_ & ~15;
+  if (ew < 16 || eh < 16)
+    return;
+
+  // Lazy one-time init: PPA client + fixed-size buffers + JPEG engine.
   if (this->jenc_ == nullptr) {
+    ppa_client_config_t pcfg = {};
+    pcfg.oper_type = PPA_OPERATION_SRM;
+    if (this->ppa_ == nullptr &&
+        ppa_register_client(&pcfg, reinterpret_cast<ppa_client_handle_t *>(&this->ppa_)) != ESP_OK) {
+      ESP_LOGE(TAG, "PPA client register failed");
+      return;
+    }
+    this->enc_w_ = ew;
+    this->enc_h_ = eh;
+    this->yuv_buf_size_ = (size_t) ew * eh * 2;  // RGB565
+    this->yuv_buf_ =
+        heap_caps_aligned_alloc(64, this->yuv_buf_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (this->yuv_buf_ == nullptr ||
+        !ensure_jpeg_enc_buf_(&this->jpeg_in_, &this->jpeg_in_size_, this->yuv_buf_size_, true) ||
+        !ensure_jpeg_enc_buf_(&this->h264_buf_, &this->h264_buf_size_, this->yuv_buf_size_, false)) {
+      ESP_LOGE(TAG, "MJPEG buffers alloc failed (%dx%d)", ew, eh);
+      return;
+    }
     jpeg_encode_engine_cfg_t jcfg = {};
     jcfg.timeout_ms = 70;
     jpeg_encoder_handle_t je = nullptr;
@@ -974,7 +1000,10 @@ void WebRTCComponent::pump_mjpeg_tx_() {
       return;
     }
     this->jenc_ = je;
-    ESP_LOGI(TAG, "MJPEG encoder ready (main-loop, face2face path)");
+    if (ew != (int) this->video_w_ || eh != (int) this->video_h_)
+      ESP_LOGW(TAG, "MJPEG size rounded to 16px: %ux%u -> %dx%d", this->video_w_, this->video_h_,
+               ew, eh);
+    ESP_LOGI(TAG, "MJPEG encoder ready (main-loop), sending exactly %dx%d", ew, eh);
   }
 
   // Sole consumer: dequeue a fresh frame (else current_buffer_index_ stays -1).
@@ -986,50 +1015,46 @@ void WebRTCComponent::pump_mjpeg_tx_() {
   if (!cam->get_current_rgb_frame(&fb, &rgb, &w, &h) || rgb == nullptr || w <= 0 || h <= 0)
     return;
 
-  // Integer decimation to fit video_w_ x video_h_; the HW codec wants dimensions
-  // in multiples of 16 (round DOWN, like face2face: 1280x720/2 -> 640x352).
-  int s = 1;
-  while (s < 8 && ((w / s) > (int) this->video_w_ || (h / s) > (int) this->video_h_))
-    s++;
-  int ow = (w / s) & ~15;
-  int oh = (h / s) & ~15;
-  if (ow < 16 || oh < 16) {
-    cam->release_buffer(fb);
-    return;
-  }
-  size_t need = (size_t) ow * oh * 2;
-  bool bufs = ensure_jpeg_enc_buf_(&this->jpeg_in_, &this->jpeg_in_size_, need, true) &&
-              ensure_jpeg_enc_buf_(&this->h264_buf_, &this->h264_buf_size_, need, false);
-  if (bufs) {
-    const uint16_t *src = reinterpret_cast<const uint16_t *>(rgb);
-    uint16_t *dst = reinterpret_cast<uint16_t *>(this->jpeg_in_);
-    if (s == 1 && ow == w) {
-      memcpy(dst, src, need);
-    } else {
-      for (int y = 0; y < oh; y++) {
-        const uint16_t *srow = src + (size_t) (y * s) * w;
-        uint16_t *drow = dst + (size_t) y * ow;
-        for (int x = 0; x < ow; x++)
-          drow[x] = srow[x * s];
-      }
-    }
-  }
-  // Release NOW (before the slow encode+send): the camera only has 2 buffers.
-  cam->release_buffer(fb);
-  if (!bufs) {
+  // PPA: scale the camera RGB565 (w x h) to EXACTLY ew x eh (the user's size),
+  // whatever the sensor delivers.
+  ppa_srm_oper_config_t srm = {};
+  srm.in.buffer = rgb;
+  srm.in.pic_w = w;
+  srm.in.pic_h = h;
+  srm.in.block_w = w;
+  srm.in.block_h = h;
+  srm.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+  srm.out.buffer = this->yuv_buf_;
+  srm.out.buffer_size = this->yuv_buf_size_;
+  srm.out.pic_w = ew;
+  srm.out.pic_h = eh;
+  srm.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+  srm.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
+  srm.scale_x = (float) ew / (float) w;
+  srm.scale_y = (float) eh / (float) h;
+  srm.mode = PPA_TRANS_MODE_BLOCKING;
+  esp_err_t pe = ppa_do_scale_rotate_mirror(static_cast<ppa_client_handle_t>(this->ppa_), &srm);
+  cam->release_buffer(fb);  // PPA is blocking; camera buffer free to re-queue now
+  if (pe != ESP_OK) {
     if (now - this->last_enc_warn_ms_ > 1000) {
       this->last_enc_warn_ms_ = now;
-      ESP_LOGW(TAG, "enc buffer alloc failed for %dx%d", ow, oh);
+      ESP_LOGW(TAG, "PPA scale failed: %s", esp_err_to_name(pe));
     }
     return;
   }
+  // PPA wrote via DMA -> make the CPU see fresh pixels, then copy into the HW
+  // JPEG encoder's own input buffer (it requires jpeg_alloc_encoder_mem memory).
+  esp_cache_msync(this->yuv_buf_, this->yuv_buf_size_,
+                  ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+  memcpy(this->jpeg_in_, this->yuv_buf_, this->yuv_buf_size_);
+  const size_t need = this->yuv_buf_size_;
 
   jpeg_encode_cfg_t jc = {};
   jc.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
   jc.sub_sample = JPEG_DOWN_SAMPLING_YUV420;
   jc.image_quality = 60;
-  jc.width = ow;
-  jc.height = oh;
+  jc.width = ew;
+  jc.height = eh;
   uint32_t enc_len = 0;
   // Encoder and decoder share one HW peripheral; both run on this task now, but
   // keep the mutex so a future off-loop user stays safe.
@@ -1077,7 +1102,7 @@ void WebRTCComponent::pump_mjpeg_tx_() {
     vret = ops->send_data(handle, &df);
   if ((this->video_tx_count_++ % 30) == 0)
     ESP_LOGI(TAG, "video TX: %u frames (MJPEG %dx%d, %u bytes via DC, ret=%d)",
-             (unsigned) this->video_tx_count_, ow, oh, (unsigned) enc_len, vret);
+             (unsigned) this->video_tx_count_, ew, eh, (unsigned) enc_len, vret);
 }
 
 void WebRTCComponent::video_tx_fn_(void *arg) {

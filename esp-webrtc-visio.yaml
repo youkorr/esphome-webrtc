@@ -153,10 +153,10 @@ external_components:
 
 ## ===========================================================================
 ##  WEBRTC — WAVESHARE 1024x600, P4 <-> P4 (MJPEG + Opus)
-##  Même room_id que le Tab5 ("tab5duo"). RÉSOLUTION : voir la note ci-dessous.
-##  video_width/height DOIT être IDENTIQUE sur les deux P4 (le récepteur taille
-##  ses buffers de décodage sur SA config). Waveshare<->Tab5 -> 1024x600 des deux
-##  côtés (mets aussi 1024x600 sur le Tab5 pour ce duo).
+##  Même room_id que le Tab5 ("tab5duo").
+##  RÉSOLUTION : video_width/height = taille EXACTE envoyée (PPA). Chaque P4 est
+##  indépendant — le récepteur adapte son canvas à la taille reçue. Pas besoin
+##  que les deux P4 aient la même valeur.
 ## ===========================================================================
 webrtc:
   id: rtc
@@ -179,12 +179,13 @@ webrtc:
   speaker_id: wave_speaker
   microphone_id: wave_microphone
   sample_rate: 16000
-  # Plafond d'ENVOI : la caméra 800x640 est réduite par division entière pour
-  # tenir dedans (multiples de 16). 800x640 => division 1 => on envoie le natif
-  # 800x640 (belle image sur l'écran 1280x720 du Tab5). Avec 640x480 on tombait
-  # à 400x320 (petit). Le récepteur adapte son canvas automatiquement.
-  video_width: 800
-  video_height: 640
+  # Résolution d'ENVOI EXACTE : le PPA redimensionne la caméra (quelle que soit
+  # sa résolution native) vers EXACTEMENT ces dimensions. TU choisis, le code
+  # respecte. Seule contrainte matérielle : multiples de 16 (sinon arrondi au 16
+  # inférieur, avec un log). Indépendant de l'autre P4 (le récepteur adapte son
+  # canvas tout seul à la taille reçue).
+  video_width: 640
+  video_height: 480
   fps: 15
   auto_start: false
   ice_servers:
