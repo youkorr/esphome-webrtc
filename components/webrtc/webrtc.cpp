@@ -1248,18 +1248,16 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
       frame_type = (int) outf.frame_type;
     }
 
-    esp_peer_video_frame_t vf = {};
-    vf.pts = pts;
-    vf.data = static_cast<uint8_t *>(self->h264_buf_);
-    vf.size = static_cast<int>(enc_len);
+    // P4<->P4: DO NOT call ops->send_video. The video m-line is negotiated
+    // a=inactive; send_video on an inactive/uninitialised RTP stream crashes
+    // esp_peer's RTP encoder (write_rtp_packet / rtp_encoder_encode_generic) -
+    // the exact bug addr2line proved for MJPEG. Video is shipped over the DATA
+    // CHANNEL below, identical to the proven MJPEG path. (A future browser-interop
+    // path with an ACTIVE video m-line would re-add send_video, gated on the
+    // negotiated video direction.)
     int vret = 0;
-    if (ops->send_video != nullptr)
-      vret = ops->send_video(handle, &vf);
-    // ALSO ship the frame over the data channel ("VID0" framing). In P4<->P4 the
-    // video m-line is negotiated a=inactive, so send_video reaches nothing (this
-    // is why the far P4 never showed an image in H.264); the DC copy is what the
-    // peer's on_data -> on_video_frame_ -> edge264 path actually consumes. A
-    // browser peer simply ignores the unknown DC binary.
+    // Ship the frame over the data channel ("VID0" framing) - the peer's
+    // on_data -> on_video_frame_ -> edge264 path consumes this.
     if (self->enable_data_channel_ && ops->send_data != nullptr) {
       size_t dc_need = (size_t) enc_len + 4;
       if (self->dc_tx_cap_ < dc_need) {

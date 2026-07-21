@@ -170,15 +170,19 @@ external_components:
     components: [h264_hp]
     refresh: 0s 
 
-# ⚠️ h264_hp et MJPEG sont INCOMPATIBLES — choisis selon video_codec :
-#   video_codec: mjpeg -> h264_hp COMMENTÉ (obligatoire)
-#   video_codec: h264  -> h264_hp: décommenté (obligatoire pour décoder)
-# Pourquoi : h264_hp active CONFIG_SPIRAM_USE_MALLOC (requis par edge264), ce
-# qui étiquette la PSRAM en mémoire "DEFAULT". Le driver JPEG matériel alloue
-# ses structures DMA2D (dont le callback on_job_picked) en MALLOC_CAP_DEFAULT
-# (jpeg_private.h, IDF 5.5.4) : elles peuvent alors tomber en PSRAM et être
-# corrompues par le DMA caméra -> crash "Instruction access fault" au 1er frame.
-# En MJPEG le décodage est fait par le JPEG matériel : edge264 est inutile.
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║ CHOIX DU CODEC VIDÉO — 2 réglages COUPLÉS, à changer ENSEMBLE :            ║
+# ║                                                                           ║
+# ║   • MJPEG :  video_codec: mjpeg   ET   la ligne « h264_hp: » COMMENTÉE     ║
+# ║   • H.264 :  video_codec: h264    ET   la ligne « h264_hp: » DÉCOMMENTÉE   ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+# Ce n'est PAS un bug, c'est une contrainte matérielle : h264_hp active
+# CONFIG_SPIRAM_USE_MALLOC (edge264 doit atteindre la PSRAM par malloc), ce qui
+# met la PSRAM en mémoire "DEFAULT". Le driver JPEG matériel (utilisé SEULEMENT
+# en MJPEG) y alloue alors ses descripteurs DMA -> corrompus par le DMA caméra
+# -> crash "Instruction access fault" au 1er frame. En H.264 le codec JPEG
+# matériel n'est PAS utilisé (encodeur H.264 matériel + décodeur edge264
+# logiciel), donc SPIRAM_USE_MALLOC est sans danger. Garde les 2 cohérents.
 # h264_hp:
 
 ## ===========================================================================
