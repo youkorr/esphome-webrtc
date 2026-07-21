@@ -41,6 +41,7 @@ CONF_AUDIO_DIRECTION = "audio_direction"
 CONF_VIDEO_WIDTH = "video_width"
 CONF_VIDEO_HEIGHT = "video_height"
 CONF_FPS = "fps"
+CONF_JPEG_QUALITY = "jpeg_quality"
 CONF_ENABLE_DATA_CHANNEL = "enable_data_channel"
 CONF_AUTO_START = "auto_start"
 CONF_ICE_SERVERS = "ice_servers"
@@ -153,6 +154,11 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_VIDEO_WIDTH, default=640): cv.uint16_t,
             cv.Optional(CONF_VIDEO_HEIGHT, default=480): cv.uint16_t,
             cv.Optional(CONF_FPS, default=15): cv.int_range(min=1, max=60),
+            # MJPEG encode quality (P4<->P4 sends JPEG over the SCTP data channel).
+            # Lower = smaller frames. Big frames (~30 KB) overflow the data channel
+            # and crash the link; keep this low enough that frames stay well under
+            # ~24 KB at your chosen resolution/fps (~40 works for 640x480).
+            cv.Optional(CONF_JPEG_QUALITY, default=40): cv.int_range(min=10, max=90),
             cv.Optional(CONF_ENABLE_DATA_CHANNEL, default=True): cv.boolean,
             cv.Optional(CONF_AUTO_START, default=False): cv.boolean,
             # fdaudio audio bridge: share fdaudio's mic + speaker (via the ESPHome
@@ -209,6 +215,7 @@ async def to_code(config):
             config[CONF_VIDEO_WIDTH], config[CONF_VIDEO_HEIGHT], config[CONF_FPS]
         )
     )
+    cg.add(var.set_jpeg_quality(config[CONF_JPEG_QUALITY]))
     cg.add(var.set_enable_data_channel(config[CONF_ENABLE_DATA_CHANNEL]))
     cg.add(var.set_auto_start(config[CONF_AUTO_START]))
 

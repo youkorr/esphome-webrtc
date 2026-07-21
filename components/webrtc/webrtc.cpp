@@ -225,6 +225,14 @@ static int peer_on_audio_data(esp_peer_audio_frame_t *frame, void *ctx) {
 // Video-over-data-channel framing magic (see dc_tx_ in webrtc.h for why).
 static const uint8_t VIDEO_DC_MAGIC[4] = {'V', 'I', 'D', '0'};
 
+// Maximum encoded JPEG frame size we will push into the SCTP data channel.
+// Larger frames fragment into too many SCTP chunks; at 10 fps the reliable
+// data-channel send buffer overflows ("SCTP: No buffer for TSN") and the stack
+// faults. The proven-stable working frames were ~11 KB; 24 KB gives headroom
+// while still refusing the ~30 KB monsters that crash the link. Frames above
+// this cap are dropped (a warning suggests lowering jpeg_quality/fps/resolution).
+static const uint32_t MJPEG_DC_MAX_FRAME = 24000;
+
 // Incoming data-channel messages: video frames (magic-prefixed) go to the video
 // path; anything else is application data.
 static int peer_on_data(esp_peer_data_frame_t *frame, void *ctx) {
@@ -1052,7 +1060,7 @@ void WebRTCComponent::pump_mjpeg_tx_() {
   jpeg_encode_cfg_t jc = {};
   jc.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
   jc.sub_sample = JPEG_DOWN_SAMPLING_YUV420;
-  jc.image_quality = 60;
+  jc.image_quality = this->jpeg_quality_;
   jc.width = ew;
   jc.height = eh;
   uint32_t enc_len = 0;
@@ -1081,6 +1089,18 @@ void WebRTCComponent::pump_mjpeg_tx_() {
   // since the beginning was THIS, not the capture/encode pipeline).
   if (!this->enable_data_channel_)
     return;
+  // Safety valve: a single frame bigger than the SCTP send window overflows the
+  // data channel ("SCTP: No buffer for TSN" flood -> Store access fault crash).
+  // Drop it (MJPEG is self-contained, the next frame repairs the picture) and
+  // hint the user to lower jpeg_quality/fps/resolution.
+  if (enc_len > MJPEG_DC_MAX_FRAME) {
+    if (now - this->last_enc_warn_ms_ > 1000) {
+      this->last_enc_warn_ms_ = now;
+      ESP_LOGW(TAG, "JPEG frame %u B > %u B cap; dropped (lower jpeg_quality/fps/resolution)",
+               (unsigned) enc_len, (unsigned) MJPEG_DC_MAX_FRAME);
+    }
+    return;
+  }
   size_t dc_need = (size_t) enc_len + 4;
   if (this->dc_tx_cap_ < dc_need) {
     heap_caps_free(this->dc_tx_);

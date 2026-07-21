@@ -81,6 +81,7 @@ class WebRTCComponent : public Component {
   void set_audio_codec(AudioCodec c) { this->audio_codec_ = c; }
   void set_video_direction(MediaDir d) { this->video_dir_ = d; }
   void set_audio_direction(MediaDir d) { this->audio_dir_ = d; }
+  void set_jpeg_quality(uint8_t q) { this->jpeg_quality_ = q; }
   void set_video_resolution(uint16_t w, uint16_t h, uint8_t fps) {
     this->video_w_ = w;
     this->video_h_ = h;
@@ -175,6 +176,10 @@ class WebRTCComponent : public Component {
   uint16_t video_w_{640};
   uint16_t video_h_{480};
   uint8_t video_fps_{15};
+  // MJPEG quality (1-100). Lower = smaller frames. The video rides the SCTP data
+  // channel, whose buffers overflow (crash) if frames are too big for the
+  // ESP-Hosted WiFi link, so default conservatively.
+  uint8_t jpeg_quality_{40};
   bool enable_data_channel_{true};
   bool auto_start_{false};
   bool auto_start_attempted_{false};

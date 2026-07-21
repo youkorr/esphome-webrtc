@@ -209,7 +209,10 @@ webrtc:
   sample_rate: 16000
   video_width: 640            # taille EXACTE envoyée (le PPA redimensionne la caméra
   video_height: 480           # vers ça, quelle que soit sa résolution native ; mult. de 16)
-  fps: 15
+  fps: 10                     # 640x480 : garde 10 fps pour ne pas saturer le data channel
+  jpeg_quality: 40            # qualité MJPEG : + bas = frames + petites. À 640x480, garde
+                              # les frames < ~24 Ko sinon le data channel SCTP déborde et
+                              # crashe (« No buffer for TSN »). 40 ≈ 12-15 Ko à 640x480.
   auto_start: false
   ice_servers:
     - url: "stun:stun.l.google.com:19302"
