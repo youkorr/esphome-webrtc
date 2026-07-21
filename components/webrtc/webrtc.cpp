@@ -226,12 +226,14 @@ static int peer_on_audio_data(esp_peer_audio_frame_t *frame, void *ctx) {
 static const uint8_t VIDEO_DC_MAGIC[4] = {'V', 'I', 'D', '0'};
 
 // Maximum encoded JPEG frame size we will push into the SCTP data channel.
-// Larger frames fragment into too many SCTP chunks; at 10 fps the reliable
-// data-channel send buffer overflows ("SCTP: No buffer for TSN") and the stack
-// faults. The proven-stable working frames were ~11 KB; 24 KB gives headroom
-// while still refusing the ~30 KB monsters that crash the link. Frames above
-// this cap are dropped (a warning suggests lowering jpeg_quality/fps/resolution).
-static const uint32_t MJPEG_DC_MAX_FRAME = 24000;
+// The video goes over a RELIABLE ordered SCTP channel on the throughput-limited
+// ESP-Hosted (C6) link. Once frames get big the link can't keep up: SCTP starts
+// retransmitting (CRC errors), the receive buffer backs up ("No buffer for TSN")
+// and the stack faults. Measured ceiling with audio also flowing is ~11-13 KB
+// per frame; 13 KB matches the proven-stable operating point. Frames above this
+// cap are dropped (MJPEG is self-contained -> the next frame repairs the image)
+// and a throttled warning tells the user to lower jpeg_quality/fps/resolution.
+static const uint32_t MJPEG_DC_MAX_FRAME = 13000;
 
 // Incoming data-channel messages: video frames (magic-prefixed) go to the video
 // path; anything else is application data.
