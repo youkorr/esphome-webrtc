@@ -228,10 +228,16 @@ class WebRTCComponent : public Component {
   bool drive_camera_{true};
   void *venc_{nullptr};             // esp_h264_enc_handle_t
   void *ppa_{nullptr};              // ppa_client_handle_t (RGB565 -> YUV420)
-  void *yuv_buf_{nullptr};          // PPA output (YUV420) buffer
+  void *yuv_buf_{nullptr};          // PPA output buffer (YUV420 for H.264, RGB565 for MJPEG)
   size_t yuv_buf_size_{0};
   void *h264_buf_{nullptr};         // encoder output bitstream buffer
   size_t h264_buf_size_{0};
+  void *jpeg_in_{nullptr};          // MJPEG only: jpeg_alloc_encoder_mem input (PPA out is memcpy'd here)
+  size_t jpeg_in_size_{0};
+  // The HW JPEG encoder and decoder share ONE peripheral. The encoder runs on the
+  // webrtc_vtx task and the decoder on the main loop (render_remote_frame_); a
+  // mutex serialises them (concurrent use corrupts the codec -> crash).
+  void *jpeg_mutex_{nullptr};       // SemaphoreHandle_t
   uint16_t enc_w_{0};               // encoder-configured frame size (from first frame)
   uint16_t enc_h_{0};
   void *video_tx_task_{nullptr};    // TaskHandle_t

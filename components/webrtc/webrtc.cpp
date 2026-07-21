@@ -437,6 +437,11 @@ void WebRTCComponent::setup() {
   if (this->video_codec_ == VIDEO_CODEC_MJPEG && this->jpeg_rx_mtx_ == nullptr) {
     this->jpeg_rx_mtx_ = xSemaphoreCreateMutex();
   }
+  // Serialises the HW JPEG encoder (webrtc_vtx) and decoder (main loop): they
+  // share one peripheral, so concurrent use corrupts it and crashes.
+  if (this->video_codec_ == VIDEO_CODEC_MJPEG && this->jpeg_mutex_ == nullptr) {
+    this->jpeg_mutex_ = xSemaphoreCreateMutex();
+  }
 #ifdef USE_H264_HP_EDGE264
   // H.264 receive: ordered access-unit queue from the peer task to the edge264
   // decode task. Created up front so early frames are queued safely.
@@ -785,18 +790,24 @@ bool WebRTCComponent::open_video_encoder_() {
     //    require that exact allocation; a plain heap_caps buffer here crashed
     //    inside jpeg_encoder_process ("Instruction access fault" on frame 1). The
     //    PPA never touches the output, so there is no alignment conflict here.
-    this->yuv_buf_size_ = (size_t) this->enc_w_ * this->enc_h_ * 2;  // RGB565 in
+    this->yuv_buf_size_ = (size_t) this->enc_w_ * this->enc_h_ * 2;  // RGB565
     this->yuv_buf_ =
         heap_caps_aligned_alloc(64, this->yuv_buf_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    jpeg_encode_memory_alloc_cfg_t imcfg = {};
+    imcfg.buffer_direction = JPEG_ENC_ALLOC_INPUT_BUFFER;
+    size_t got_in = 0;
+    this->jpeg_in_ = jpeg_alloc_encoder_mem(this->yuv_buf_size_, &imcfg, &got_in);
+    this->jpeg_in_size_ = got_in;
     jpeg_encode_memory_alloc_cfg_t omcfg = {};
     omcfg.buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER;
     size_t got_out = 0;
     this->h264_buf_ =
         jpeg_alloc_encoder_mem((size_t) this->enc_w_ * this->enc_h_ * 2, &omcfg, &got_out);
     this->h264_buf_size_ = got_out;
-    if (this->yuv_buf_ == nullptr || this->h264_buf_ == nullptr) {
-      ESP_LOGE(TAG, "JPEG enc buffers alloc failed (in=%u out=%u)",
-               (unsigned) this->yuv_buf_size_, (unsigned) this->h264_buf_size_);
+    if (this->yuv_buf_ == nullptr || this->jpeg_in_ == nullptr || this->h264_buf_ == nullptr) {
+      ESP_LOGE(TAG, "JPEG enc buffers alloc failed (ppa=%u in=%u out=%u)",
+               (unsigned) this->yuv_buf_size_, (unsigned) this->jpeg_in_size_,
+               (unsigned) this->h264_buf_size_);
       return false;
     }
     jpeg_encode_engine_cfg_t jcfg = {};
@@ -881,6 +892,10 @@ void WebRTCComponent::close_video_encoder_() {
   if (this->yuv_buf_ != nullptr) {
     heap_caps_free(this->yuv_buf_);
     this->yuv_buf_ = nullptr;
+  }
+  if (this->jpeg_in_ != nullptr) {
+    heap_caps_free(this->jpeg_in_);
+    this->jpeg_in_ = nullptr;
   }
   if (this->h264_buf_ != nullptr) {
     heap_caps_free(this->h264_buf_);
@@ -968,6 +983,13 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
     uint32_t enc_len = 0;
     int frame_type = 0;
     if (mjpeg) {
+      // The PPA wrote RGB565 into yuv_buf_ via DMA; make the CPU see the fresh
+      // pixels, then copy them into the encoder's OWN input buffer (the HW JPEG
+      // codec requires jpeg_alloc_encoder_mem buffers - a plain buffer crashed
+      // inside jpeg_encoder_process).
+      esp_cache_msync(self->yuv_buf_, self->yuv_buf_size_,
+                      ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+      memcpy(self->jpeg_in_, self->yuv_buf_, self->yuv_buf_size_);
       // Encode RGB565 -> JPEG on the P4 HW JPEG codec.
       jpeg_encode_cfg_t jc = {};
       jc.width = self->enc_w_;
@@ -975,10 +997,15 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
       jc.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
       jc.sub_sample = JPEG_DOWN_SAMPLING_YUV420;
       jc.image_quality = 60;  // balance quality vs the ESP-Hosted C6 uplink
+      // Serialise with the main-loop decoder (shared HW JPEG peripheral).
+      if (self->jpeg_mutex_ != nullptr)
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(self->jpeg_mutex_), portMAX_DELAY);
       esp_err_t je = jpeg_encoder_process(
           static_cast<jpeg_encoder_handle_t>(self->jenc_), &jc,
-          static_cast<uint8_t *>(self->yuv_buf_), self->yuv_buf_size_,
+          static_cast<uint8_t *>(self->jpeg_in_), self->yuv_buf_size_,
           static_cast<uint8_t *>(self->h264_buf_), self->h264_buf_size_, &enc_len);
+      if (self->jpeg_mutex_ != nullptr)
+        xSemaphoreGive(static_cast<SemaphoreHandle_t>(self->jpeg_mutex_));
       if (je != ESP_OK) {
         if ((self->video_tx_count_ % 100) == 0)
           ESP_LOGW(TAG, "jpeg encode failed: %s", esp_err_to_name(je));
@@ -1143,10 +1170,15 @@ void WebRTCComponent::render_remote_frame_() {
   dc.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
   dc.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
   uint32_t outlen = 0;
+  // Serialise with the video_tx encoder (shared HW JPEG peripheral).
+  if (this->jpeg_mutex_ != nullptr)
+    xSemaphoreTake(static_cast<SemaphoreHandle_t>(this->jpeg_mutex_), portMAX_DELAY);
   esp_err_t de = jpeg_decoder_process(static_cast<jpeg_decoder_handle_t>(this->jdec_), &dc,
                                       static_cast<uint8_t *>(this->jpeg_dec_in_), jsize,
                                       static_cast<uint8_t *>(this->remote_rgb_),
                                       this->remote_rgb_cap_, &outlen);
+  if (this->jpeg_mutex_ != nullptr)
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(this->jpeg_mutex_));
   if (de != ESP_OK) {
     if ((this->video_rx_count_ % 100) == 0)
       ESP_LOGW(TAG, "jpeg decode failed: %s", esp_err_to_name(de));
