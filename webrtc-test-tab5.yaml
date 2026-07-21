@@ -335,11 +335,18 @@ esp_cam_sensor:
   pixel_format: "RGB565"      # Zero-copy 
   framerate: 30
   jpeg_quality: 15
-  mirror_x: false    # Flip horizontal (hardware)
-  mirror_y: false    # Flip vertical
-  rotation: 0         # 0/90/180/270°
-  crop_offset_x: 0   # Crop pixels from left
-  ppa_enabled: false    # PPA
+  mirror_x: false    # Flip horizontal (hardware) - laisse false (voir ppa_enabled)
+  mirror_y: false    # Flip vertical - laisse false (voir ppa_enabled)
+  rotation: 0         # 0/90/180/270° - laisse 0 (voir ppa_enabled)
+  crop_offset_x: 0   # Crop pixels from left - laisse 0 (voir ppa_enabled)
+  # OBLIGATOIRE en visio MJPEG sendrecv: la caméra NE DOIT PAS utiliser le PPA.
+  # Sur le P4 le PPA et le codec JPEG matériel partagent le moteur DMA; si la
+  # caméra fait un PPA à chaque capture ALORS que le webrtc encode (TX) ET decode
+  # (RX) sur le codec JPEG, le relais encodeur<->decodeur fige la boucle
+  # principale (task_wdt, 1 encode + 1 decode puis mort). ppa_enabled: false ->
+  # une seule famille de clients sur le codec. ATTENTION: mirror/rotation/crop
+  # ci-dessus RÉACTIVENT le PPA même avec false -> garde-les à 0/false.
+  ppa_enabled: false
 
       
 # UN SEUL canvas par P4 (le correspondant). On N'AFFICHE PAS l'auto-aperçu local
