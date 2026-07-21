@@ -170,12 +170,16 @@ external_components:
     components: [h264_hp]
     refresh: 0s 
 
-# edge264 = décodage H.264 (High profile) vers le canvas. OBLIGATOIRE pour
-# afficher la vidéo H.264 du correspondant (P4<->P4 en video_codec: h264).
-# L'encodeur JPEG matériel plantant, on est passé en H.264 : cette ligne doit
-# donc rester DÉCOMMENTÉE des deux côtés (sinon les frames H.264 arrivent mais
-# rien ne les décode -> pas d'image). Composant interne, aucune config.
-h264_hp:
+# ⚠️ h264_hp et MJPEG sont INCOMPATIBLES — choisis selon video_codec :
+#   video_codec: mjpeg -> h264_hp COMMENTÉ (obligatoire)
+#   video_codec: h264  -> h264_hp: décommenté (obligatoire pour décoder)
+# Pourquoi : h264_hp active CONFIG_SPIRAM_USE_MALLOC (requis par edge264), ce
+# qui étiquette la PSRAM en mémoire "DEFAULT". Le driver JPEG matériel alloue
+# ses structures DMA2D (dont le callback on_job_picked) en MALLOC_CAP_DEFAULT
+# (jpeg_private.h, IDF 5.5.4) : elles peuvent alors tomber en PSRAM et être
+# corrompues par le DMA caméra -> crash "Instruction access fault" au 1er frame.
+# En MJPEG le décodage est fait par le JPEG matériel : edge264 est inutile.
+# h264_hp:
 
 ## ===========================================================================
 ##  WEBRTC — P4 <-> P4 (MJPEG vidéo matérielle + Opus audio, 1280x720)
