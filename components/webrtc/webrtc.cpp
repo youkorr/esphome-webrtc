@@ -1484,13 +1484,18 @@ void WebRTCComponent::convert_yuv420_to_rgb565_(uint8_t *yuv, uint8_t *rgb565, i
         r = r < 0 ? 0 : (r > 255 ? 255 : r);
         g = g < 0 ? 0 : (g > 255 ? 255 : g);
         b = b < 0 ? 0 : (b > 255 ? 255 : b);
-        d0[i + k] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+        // Byte-swapped RGB565 for LVGL, same as the MJPEG decode path: this
+        // display reads RGB565 with the two bytes swapped, so a plain
+        // (R<<11|G<<5|B) shows a green/cyan cast. Emit the swapped word directly.
+        uint16_t px = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+        d0[i + k] = (uint16_t) ((px >> 8) | (px << 8));
         y = y1[i + k];
         r = y + rc, g = y - gc, b = y + bc;
         r = r < 0 ? 0 : (r > 255 ? 255 : r);
         g = g < 0 ? 0 : (g > 255 ? 255 : g);
         b = b < 0 ? 0 : (b > 255 ? 255 : b);
-        d1[i + k] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+        px = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+        d1[i + k] = (uint16_t) ((px >> 8) | (px << 8));
       }
     }
   }
