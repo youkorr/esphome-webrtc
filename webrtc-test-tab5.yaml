@@ -192,8 +192,9 @@ webrtc:
   # dépendre de webrtc.espressif.com. MÊME url + token sur les deux P4.
   # signaling_url: "http://192.168.1.12:8080"
   # signaling_token: "change-moi-secret-partage"
-  video_codec: h264           # H.264 : encodeur matériel P4 + décodage edge264 (h264_hp)
-                              # (l'encodeur JPEG matériel plante, H.264 fonctionne et est réactif)
+  video_codec: mjpeg          # MJPEG chemin face2face : capture + décimation CPU +
+                              # encodeur JPEG matériel, tout sur la boucle principale.
+                              # Alternative validée : h264 (encodeur HW + edge264).
   audio_codec: opus           # 16 kHz large bande (P4<->P4)
   video_direction: sendrecv   # envoie ET reçoit la vidéo
   audio_direction: sendrecv   # envoie ET reçoit l'audio

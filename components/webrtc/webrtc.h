@@ -232,8 +232,15 @@ class WebRTCComponent : public Component {
   size_t yuv_buf_size_{0};
   void *h264_buf_{nullptr};         // encoder output bitstream buffer
   size_t h264_buf_size_{0};
-  void *jpeg_in_{nullptr};          // MJPEG only: jpeg_alloc_encoder_mem input (PPA out is memcpy'd here)
+  void *jpeg_in_{nullptr};          // MJPEG only: jpeg_alloc_encoder_mem input (CPU-decimated RGB565)
   size_t jpeg_in_size_{0};
+  // MJPEG TX runs on the MAIN LOOP (like the proven face2face pump_video_tx_):
+  // capture -> CPU integer decimation -> HW JPEG encode -> send_video. No PPA and
+  // no dedicated task: the PPA+task pipeline crashed deterministically on the
+  // first frame, while this exact main-loop path is field-proven on both P4s.
+  void pump_mjpeg_tx_();
+  uint32_t last_vtx_ms_{0};         // main-loop MJPEG frame pacing
+  uint32_t last_enc_warn_ms_{0};    // throttled encode-failure warnings
   // The HW JPEG encoder and decoder share ONE peripheral. The encoder runs on the
   // webrtc_vtx task and the decoder on the main loop (render_remote_frame_); a
   // mutex serialises them (concurrent use corrupts the codec -> crash).

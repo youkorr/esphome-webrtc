@@ -903,6 +903,141 @@ void WebRTCComponent::close_video_encoder_() {
   }
 }
 
+// Grow a JPEG-encoder DMA buffer to at least `need` bytes (mirror of face2face's
+// ensure_enc_buf: the HW JPEG codec requires jpeg_alloc_encoder_mem buffers).
+static bool ensure_jpeg_enc_buf_(void **buf, size_t *cap, size_t need, bool input) {
+  if (*buf != nullptr && *cap >= need)
+    return true;
+  if (*buf != nullptr) {
+    heap_caps_free(*buf);
+    *buf = nullptr;
+    *cap = 0;
+  }
+  jpeg_encode_memory_alloc_cfg_t cfg = {};
+  cfg.buffer_direction = input ? JPEG_ENC_ALLOC_INPUT_BUFFER : JPEG_ENC_ALLOC_OUTPUT_BUFFER;
+  size_t got = 0;
+  *buf = jpeg_alloc_encoder_mem(need, &cfg, &got);
+  *cap = (*buf != nullptr) ? (got != 0 ? got : need) : 0;
+  return *buf != nullptr;
+}
+
+// MJPEG video TX on the MAIN LOOP — a faithful port of face2face's proven
+// pump_video_tx_(): drive the V4L2 capture, integer-decimate the RGB565 frame on
+// the CPU straight into the encoder's own DMA input buffer, HW-JPEG encode,
+// send. No PPA and no dedicated task: the PPA+webrtc_vtx pipeline crashed
+// deterministically on the first frame on this hardware, while this exact
+// main-loop path runs in production on the same P4s + cameras.
+void WebRTCComponent::pump_mjpeg_tx_() {
+  if (!this->connected_.load() || this->camera_ == nullptr || !(this->video_dir_ & MEDIA_DIR_SEND_ONLY))
+    return;
+  const uint32_t frame_ms = 1000 / (this->video_fps_ > 0 ? this->video_fps_ : 15);
+  uint32_t now = millis();
+  if (now - this->last_vtx_ms_ < frame_ms)
+    return;
+  this->last_vtx_ms_ = now;
+
+  auto *cam = this->camera_;
+  if (!cam->is_streaming())
+    cam->start_streaming();
+  // Lazy engine, created and used only on this task (like face2face jpeg_init_).
+  if (this->jenc_ == nullptr) {
+    jpeg_encode_engine_cfg_t jcfg = {};
+    jcfg.timeout_ms = 70;
+    jpeg_encoder_handle_t je = nullptr;
+    if (jpeg_new_encoder_engine(&jcfg, &je) != ESP_OK || je == nullptr) {
+      ESP_LOGE(TAG, "jpeg_new_encoder_engine failed");
+      return;
+    }
+    this->jenc_ = je;
+    ESP_LOGI(TAG, "MJPEG encoder ready (main-loop, face2face path)");
+  }
+
+  // Sole consumer: dequeue a fresh frame (else current_buffer_index_ stays -1).
+  if (this->drive_camera_ && !cam->capture_frame())
+    return;
+  esp_cam_sensor::SimpleBufferElement *fb = nullptr;
+  uint8_t *rgb = nullptr;
+  int w = 0, h = 0;
+  if (!cam->get_current_rgb_frame(&fb, &rgb, &w, &h) || rgb == nullptr || w <= 0 || h <= 0)
+    return;
+
+  // Integer decimation to fit video_w_ x video_h_; the HW codec wants dimensions
+  // in multiples of 16 (round DOWN, like face2face: 1280x720/2 -> 640x352).
+  int s = 1;
+  while (s < 8 && ((w / s) > (int) this->video_w_ || (h / s) > (int) this->video_h_))
+    s++;
+  int ow = (w / s) & ~15;
+  int oh = (h / s) & ~15;
+  if (ow < 16 || oh < 16) {
+    cam->release_buffer(fb);
+    return;
+  }
+  size_t need = (size_t) ow * oh * 2;
+  bool bufs = ensure_jpeg_enc_buf_(&this->jpeg_in_, &this->jpeg_in_size_, need, true) &&
+              ensure_jpeg_enc_buf_(&this->h264_buf_, &this->h264_buf_size_, need, false);
+  if (bufs) {
+    const uint16_t *src = reinterpret_cast<const uint16_t *>(rgb);
+    uint16_t *dst = reinterpret_cast<uint16_t *>(this->jpeg_in_);
+    if (s == 1 && ow == w) {
+      memcpy(dst, src, need);
+    } else {
+      for (int y = 0; y < oh; y++) {
+        const uint16_t *srow = src + (size_t) (y * s) * w;
+        uint16_t *drow = dst + (size_t) y * ow;
+        for (int x = 0; x < ow; x++)
+          drow[x] = srow[x * s];
+      }
+    }
+  }
+  // Release NOW (before the slow encode+send): the camera only has 2 buffers.
+  cam->release_buffer(fb);
+  if (!bufs) {
+    if (now - this->last_enc_warn_ms_ > 1000) {
+      this->last_enc_warn_ms_ = now;
+      ESP_LOGW(TAG, "enc buffer alloc failed for %dx%d", ow, oh);
+    }
+    return;
+  }
+
+  jpeg_encode_cfg_t jc = {};
+  jc.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
+  jc.sub_sample = JPEG_DOWN_SAMPLING_YUV420;
+  jc.image_quality = 60;
+  jc.width = ow;
+  jc.height = oh;
+  uint32_t enc_len = 0;
+  // Encoder and decoder share one HW peripheral; both run on this task now, but
+  // keep the mutex so a future off-loop user stays safe.
+  if (this->jpeg_mutex_ != nullptr)
+    xSemaphoreTake(static_cast<SemaphoreHandle_t>(this->jpeg_mutex_), portMAX_DELAY);
+  esp_err_t je = jpeg_encoder_process(static_cast<jpeg_encoder_handle_t>(this->jenc_), &jc,
+                                      static_cast<uint8_t *>(this->jpeg_in_), need,
+                                      static_cast<uint8_t *>(this->h264_buf_),
+                                      this->h264_buf_size_, &enc_len);
+  if (this->jpeg_mutex_ != nullptr)
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(this->jpeg_mutex_));
+  if (je != ESP_OK || enc_len == 0) {
+    if (now - this->last_enc_warn_ms_ > 1000) {
+      this->last_enc_warn_ms_ = now;
+      ESP_LOGW(TAG, "jpeg encode failed: %s", esp_err_to_name(je));
+    }
+    return;
+  }
+
+  const esp_peer_ops_t *ops = static_cast<const esp_peer_ops_t *>(this->ops_);
+  auto handle = static_cast<esp_peer_handle_t>(this->peer_);
+  esp_peer_video_frame_t vf = {};
+  vf.pts = now;
+  vf.data = static_cast<uint8_t *>(this->h264_buf_);
+  vf.size = static_cast<int>(enc_len);
+  int vret = 0;
+  if (ops != nullptr && ops->send_video != nullptr && handle != nullptr)
+    vret = ops->send_video(handle, &vf);
+  if ((this->video_tx_count_++ % 30) == 0)
+    ESP_LOGI(TAG, "video TX: %u frames (MJPEG %dx%d, %u bytes, ret=%d)",
+             (unsigned) this->video_tx_count_, ow, oh, (unsigned) enc_len, vret);
+}
+
 void WebRTCComponent::video_tx_fn_(void *arg) {
   auto *self = static_cast<WebRTCComponent *>(arg);
   const esp_peer_ops_t *ops = static_cast<const esp_peer_ops_t *>(self->ops_);
@@ -1514,7 +1649,14 @@ void WebRTCComponent::start() {
 
 #ifdef USE_ESP_WEBRTC_VIDEO
   // 4c) Video bridge: camera RGB565 -> PPA YUV420 -> H.264 -> send_video.
-  if (this->video_bridge_enabled_() && this->video_tx_task_ == nullptr) {
+  if (this->video_bridge_enabled_() && this->video_codec_ == VIDEO_CODEC_MJPEG) {
+    // MJPEG TX runs on the MAIN LOOP (pump_mjpeg_tx_, the proven face2face
+    // path): no webrtc_vtx task, no PPA. See pump_mjpeg_tx_ for why.
+    this->video_tx_count_ = 0;
+    this->last_vtx_ms_ = 0;
+    ESP_LOGI(TAG, "video bridge ready (main-loop MJPEG, target %ux%u @%ufps)", this->video_w_,
+             this->video_h_, this->video_fps_);
+  } else if (this->video_bridge_enabled_() && this->video_tx_task_ == nullptr) {
     this->video_run_ = true;
     this->video_task_done_ = false;
     this->video_tx_count_ = 0;
@@ -1607,6 +1749,10 @@ void WebRTCComponent::stop() {
   this->video_rx_task_ = nullptr;
   this->task_ = nullptr;
 #ifdef USE_ESP_WEBRTC_VIDEO
+  // MJPEG main-loop TX: no task owns the encoder, so close it here (we ARE the
+  // main loop; pump_mjpeg_tx_ can't be running concurrently).
+  if (this->video_codec_ == VIDEO_CODEC_MJPEG)
+    this->close_video_encoder_();
   // Drain any queued H.264 access units (the decode task is gone now) and re-arm
   // the IDR re-sync so the next call starts cleanly.
   if (this->video_q_ != nullptr) {
@@ -1658,6 +1804,10 @@ void WebRTCComponent::loop() {
 #ifdef USE_ESP_WEBRTC_VIDEO
   // Decode + draw the remote peer's newest MJPEG frame on the LVGL (main) task.
   this->render_remote_frame_();
+  // MJPEG send also runs here (capture -> CPU decimate -> HW JPEG -> send), the
+  // proven face2face architecture: encode and decode naturally serialized.
+  if (this->started_ && this->video_codec_ == VIDEO_CODEC_MJPEG && this->video_bridge_enabled_())
+    this->pump_mjpeg_tx_();
 #endif
 
   uint32_t evs = this->pending_states_.exchange(0u, std::memory_order_acquire);
