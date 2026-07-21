@@ -287,7 +287,14 @@ async def to_code(config):
     # === PSRAM / lwIP ===
     add_idf_sdkconfig_option("CONFIG_SPIRAM", True)
     add_idf_sdkconfig_option("CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP", True)
-    add_idf_sdkconfig_option("CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL", 256)
+    # 16384 (NOT 256): must match h264_hp's value. h264_hp enables
+    # CONFIG_SPIRAM_USE_MALLOC (edge264 needs malloc to reach PSRAM); with that
+    # active, a 256-byte threshold pushes EVERY plain malloc >256 B into PSRAM —
+    # including esp_driver_jpeg's internal structs/DMA descriptors. The 2D-DMA
+    # engine then reads descriptors from contended PSRAM (camera DMA + WiFi) and
+    # corrupts them -> the JPEG encoder crashed on a garbage function pointer
+    # full of pixel data. 16 KB keeps driver-sized allocations in internal DRAM.
+    add_idf_sdkconfig_option("CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL", 16384)
     add_idf_sdkconfig_option("CONFIG_LWIP_IPV6", True)
     add_idf_sdkconfig_option("CONFIG_LWIP_MAX_UDP_PCBS", 1024)
     add_idf_sdkconfig_option("CONFIG_LWIP_UDP_RECVMBOX_SIZE", 64)
