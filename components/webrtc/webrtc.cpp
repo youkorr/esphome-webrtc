@@ -1484,18 +1484,13 @@ void WebRTCComponent::convert_yuv420_to_rgb565_(uint8_t *yuv, uint8_t *rgb565, i
         r = r < 0 ? 0 : (r > 255 ? 255 : r);
         g = g < 0 ? 0 : (g > 255 ? 255 : g);
         b = b < 0 ? 0 : (b > 255 ? 255 : b);
-        // Byte-swapped RGB565 for LVGL, same as the MJPEG decode path: this
-        // display reads RGB565 with the two bytes swapped, so a plain
-        // (R<<11|G<<5|B) shows a green/cyan cast. Emit the swapped word directly.
-        uint16_t px = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-        d0[i + k] = (uint16_t) ((px >> 8) | (px << 8));
+        d0[i + k] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
         y = y1[i + k];
         r = y + rc, g = y - gc, b = y + bc;
         r = r < 0 ? 0 : (r > 255 ? 255 : r);
         g = g < 0 ? 0 : (g > 255 ? 255 : g);
         b = b < 0 ? 0 : (b > 255 ? 255 : b);
-        px = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-        d1[i + k] = (uint16_t) ((px >> 8) | (px << 8));
+        d1[i + k] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
       }
     }
   }
@@ -1592,8 +1587,13 @@ void WebRTCComponent::video_rx_fn_(void *arg) {
       static bool dbg_dim_logged = false;
       if (!dbg_dim_logged) {
         dbg_dim_logged = true;
-        ESP_LOGI(TAG, "edge264 output=%dx%d (stride_y=%d stride_c=%d) -> letterboxed into %dx%d",
-                 f.width, f.height, f.stride_y, f.stride_c, W, H);
+        // Sample luma + both chroma planes: if Cb/Cr read as ~128 the color is
+        // neutral (grey); if they read ~0 the image goes pure green (U=V=-128).
+        int ys = f.y ? f.y[f.stride_y * 8 + 8] : -1;
+        int cbs = f.cb ? f.cb[f.stride_c * 4 + 4] : -1;
+        int crs = f.cr ? f.cr[f.stride_c * 4 + 4] : -1;
+        ESP_LOGI(TAG, "edge264 out=%dx%d stride_y=%d stride_c=%d | sample Y=%d Cb=%d Cr=%d",
+                 f.width, f.height, f.stride_y, f.stride_c, ys, cbs, crs);
       }
       // The browser may send a resolution larger than we sized buffers for.
       // We crop safely below, but warn once so the mismatch is visible (a much
