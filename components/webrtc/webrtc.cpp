@@ -222,6 +222,25 @@ static int peer_on_audio_data(esp_peer_audio_frame_t *frame, void *ctx) {
   return 0;
 }
 
+// Video-over-data-channel framing magic (see dc_tx_ in webrtc.h for why).
+static const uint8_t VIDEO_DC_MAGIC[4] = {'V', 'I', 'D', '0'};
+
+// Incoming data-channel messages: video frames (magic-prefixed) go to the video
+// path; anything else is application data.
+static int peer_on_data(esp_peer_data_frame_t *frame, void *ctx) {
+  if (frame == nullptr || frame->data == nullptr || frame->size <= 0) {
+    return 0;
+  }
+#ifdef USE_ESP_WEBRTC_VIDEO
+  if (frame->size > 4 && memcmp(frame->data, VIDEO_DC_MAGIC, 4) == 0) {
+    static_cast<WebRTCComponent *>(ctx)->on_video_frame_(frame->data + 4, frame->size - 4);
+    return 0;
+  }
+#endif
+  ESP_LOGD(TAG, "data channel RX: %d bytes", frame->size);
+  return 0;
+}
+
 void WebRTCComponent::on_peer_state_(int state) {
   if (state >= 0 && state < 32) {
     this->pending_states_.fetch_or(1u << state, std::memory_order_relaxed);
@@ -511,6 +530,7 @@ bool WebRTCComponent::open_peer_() {
   cfg.on_audio_info = peer_on_audio_info;
   cfg.on_video_data = peer_on_video_data;
   cfg.on_audio_data = peer_on_audio_data;
+  cfg.on_data = peer_on_data;
 
   esp_peer_handle_t handle = nullptr;
   if (ops->open(&cfg, &handle) != ESP_PEER_ERR_NONE || handle == nullptr) {
@@ -897,6 +917,11 @@ void WebRTCComponent::close_video_encoder_() {
     heap_caps_free(this->jpeg_in_);
     this->jpeg_in_ = nullptr;
   }
+  if (this->dc_tx_ != nullptr) {
+    heap_caps_free(this->dc_tx_);
+    this->dc_tx_ = nullptr;
+    this->dc_tx_cap_ = 0;
+  }
   if (this->h264_buf_ != nullptr) {
     heap_caps_free(this->h264_buf_);
     this->h264_buf_ = nullptr;
@@ -1024,17 +1049,34 @@ void WebRTCComponent::pump_mjpeg_tx_() {
     return;
   }
 
+  // Send over the DATA CHANNEL, NOT ops->send_video. In P4<->P4 the video m-line
+  // is negotiated a=inactive (no RTP video stream); send_video then runs esp_peer's
+  // RTP encoder on an uninitialized stream and crashes inside write_rtp_packet /
+  // rtp_encoder_encode_generic (proven via addr2line: every 'first frame' crash
+  // since the beginning was THIS, not the capture/encode pipeline).
+  if (!this->enable_data_channel_)
+    return;
+  size_t dc_need = (size_t) enc_len + 4;
+  if (this->dc_tx_cap_ < dc_need) {
+    heap_caps_free(this->dc_tx_);
+    this->dc_tx_ = heap_caps_malloc(dc_need + 4096, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    this->dc_tx_cap_ = (this->dc_tx_ != nullptr) ? dc_need + 4096 : 0;
+    if (this->dc_tx_ == nullptr)
+      return;
+  }
+  memcpy(this->dc_tx_, VIDEO_DC_MAGIC, 4);
+  memcpy(static_cast<uint8_t *>(this->dc_tx_) + 4, this->h264_buf_, enc_len);
   const esp_peer_ops_t *ops = static_cast<const esp_peer_ops_t *>(this->ops_);
   auto handle = static_cast<esp_peer_handle_t>(this->peer_);
-  esp_peer_video_frame_t vf = {};
-  vf.pts = now;
-  vf.data = static_cast<uint8_t *>(this->h264_buf_);
-  vf.size = static_cast<int>(enc_len);
+  esp_peer_data_frame_t df = {};
+  df.type = ESP_PEER_DATA_CHANNEL_DATA;
+  df.data = static_cast<uint8_t *>(this->dc_tx_);
+  df.size = static_cast<int>(dc_need);
   int vret = 0;
-  if (ops != nullptr && ops->send_video != nullptr && handle != nullptr)
-    vret = ops->send_video(handle, &vf);
+  if (ops != nullptr && ops->send_data != nullptr && handle != nullptr)
+    vret = ops->send_data(handle, &df);
   if ((this->video_tx_count_++ % 30) == 0)
-    ESP_LOGI(TAG, "video TX: %u frames (MJPEG %dx%d, %u bytes, ret=%d)",
+    ESP_LOGI(TAG, "video TX: %u frames (MJPEG %dx%d, %u bytes via DC, ret=%d)",
              (unsigned) this->video_tx_count_, ow, oh, (unsigned) enc_len, vret);
 }
 
@@ -1175,6 +1217,28 @@ void WebRTCComponent::video_tx_fn_(void *arg) {
     int vret = 0;
     if (ops->send_video != nullptr)
       vret = ops->send_video(handle, &vf);
+    // ALSO ship the frame over the data channel ("VID0" framing). In P4<->P4 the
+    // video m-line is negotiated a=inactive, so send_video reaches nothing (this
+    // is why the far P4 never showed an image in H.264); the DC copy is what the
+    // peer's on_data -> on_video_frame_ -> edge264 path actually consumes. A
+    // browser peer simply ignores the unknown DC binary.
+    if (self->enable_data_channel_ && ops->send_data != nullptr) {
+      size_t dc_need = (size_t) enc_len + 4;
+      if (self->dc_tx_cap_ < dc_need) {
+        heap_caps_free(self->dc_tx_);
+        self->dc_tx_ = heap_caps_malloc(dc_need + 4096, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        self->dc_tx_cap_ = (self->dc_tx_ != nullptr) ? dc_need + 4096 : 0;
+      }
+      if (self->dc_tx_ != nullptr) {
+        memcpy(self->dc_tx_, VIDEO_DC_MAGIC, 4);
+        memcpy(static_cast<uint8_t *>(self->dc_tx_) + 4, self->h264_buf_, enc_len);
+        esp_peer_data_frame_t df = {};
+        df.type = ESP_PEER_DATA_CHANNEL_DATA;
+        df.data = static_cast<uint8_t *>(self->dc_tx_);
+        df.size = static_cast<int>(dc_need);
+        ops->send_data(handle, &df);
+      }
+    }
     pts += frame_ms;
     if ((self->video_tx_count_++ % 30) == 0)
       ESP_LOGI(TAG, "video TX: %u frames (%s %ux%u, %u bytes, type=%d, ret=%d)",

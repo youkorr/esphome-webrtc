@@ -241,6 +241,13 @@ class WebRTCComponent : public Component {
   void pump_mjpeg_tx_();
   uint32_t last_vtx_ms_{0};         // main-loop MJPEG frame pacing
   uint32_t last_enc_warn_ms_{0};    // throttled encode-failure warnings
+  // Video rides the SCTP DATA CHANNEL in P4<->P4: the video m-line is negotiated
+  // a=inactive (no RTP video stream), and esp_peer's send_video then runs its RTP
+  // encoder on an uninitialized stream -> crash inside write_rtp_packet /
+  // rtp_encoder_encode_generic (proven by addr2line on the crash dumps). Frames
+  // are sent as one DC message prefixed with a 4-byte magic ("VID0").
+  void *dc_tx_{nullptr};
+  size_t dc_tx_cap_{0};
   // The HW JPEG encoder and decoder share ONE peripheral. The encoder runs on the
   // webrtc_vtx task and the decoder on the main loop (render_remote_frame_); a
   // mutex serialises them (concurrent use corrupts the codec -> crash).
