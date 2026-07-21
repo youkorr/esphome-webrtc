@@ -1584,6 +1584,12 @@ void WebRTCComponent::video_rx_fn_(void *arg) {
     while (dec->get_frame(&f)) {
       const int sw = f.width & ~1;
       const int sh = f.height & ~1;
+      static bool dbg_dim_logged = false;
+      if (!dbg_dim_logged) {
+        dbg_dim_logged = true;
+        ESP_LOGI(TAG, "edge264 output=%dx%d (stride_y=%d stride_c=%d) -> letterboxed into %dx%d",
+                 f.width, f.height, f.stride_y, f.stride_c, W, H);
+      }
       // The browser may send a resolution larger than we sized buffers for.
       // We crop safely below, but warn once so the mismatch is visible (a much
       // larger stream also strains PSRAM / decode time).
