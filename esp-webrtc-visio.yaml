@@ -179,8 +179,12 @@ webrtc:
   speaker_id: wave_speaker
   microphone_id: wave_microphone
   sample_rate: 16000
-  video_width: 1024
-  video_height: 600
+  # Plafond d'ENVOI : la caméra 800x640 est réduite par division entière pour
+  # tenir dedans (multiples de 16). 800x640 => division 1 => on envoie le natif
+  # 800x640 (belle image sur l'écran 1280x720 du Tab5). Avec 640x480 on tombait
+  # à 400x320 (petit). Le récepteur adapte son canvas automatiquement.
+  video_width: 800
+  video_height: 640
   fps: 15
   auto_start: false
   ice_servers:
