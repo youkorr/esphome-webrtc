@@ -1387,6 +1387,15 @@ void WebRTCComponent::render_remote_frame_() {
   // pixels (same M2C sync the camera->canvas path uses).
   esp_cache_msync(this->remote_rgb_, need,
                   ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+  // The HW JPEG decoder emits RGB565 with a byte order LVGL reads swapped
+  // (psychedelic magenta/cyan colors). Swap the two bytes of each pixel in
+  // place, exactly like face2face's proven swap_colors_ path.
+  {
+    uint16_t *px = static_cast<uint16_t *>(this->remote_rgb_);
+    size_t n = need / 2;
+    for (size_t i = 0; i < n; i++)
+      px[i] = (uint16_t) ((px[i] >> 8) | (px[i] << 8));
+  }
 
   auto *canvas = static_cast<lv_obj_t *>(this->remote_canvas_);
   auto *db = static_cast<lv_draw_buf_t *>(this->remote_draw_buf_);
