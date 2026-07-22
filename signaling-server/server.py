@@ -81,17 +81,41 @@ class Server(ThreadingHTTPServer):
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"  # Content-Length fourni -> connexions propres
 
+    # CRUCIAL : timeout de lecture par connexion. Sans lui, une connexion keep-alive
+    # dont le client a disparu (reset/crash/coupure Wi-Fi) laisse le thread de
+    # traitement BLOQUÉ pour toujours sur la lecture de la requête suivante. Au fil
+    # des cycles connexion/reset, ces threads zombies s'accumulent jusqu'à ce que le
+    # ThreadingHTTPServer ne puisse plus accepter de nouvelles connexions -> les P4
+    # se prennent des "connection reset" et il faut REDÉMARRER le conteneur. Les P4
+    # sondent toutes les ~300 ms, donc une connexion vivante n'atteint jamais ce
+    # délai ; seules les connexions mortes sont récupérées (au bout de timeout s).
+    timeout = 20
+
     def log_message(self, fmt, *args):
         pass  # on gère nos propres logs
 
+    def handle_one_request(self):
+        # Une coupure client (reset/timeout) ne doit pas remonter en trace ni tuer
+        # salement le thread : on ferme la connexion proprement (le thread se termine).
+        try:
+            super().handle_one_request()
+        except (ConnectionError, TimeoutError, OSError):
+            self.close_connection = True
+
     def _send(self, code, obj=None):
         body = b"" if obj is None else json.dumps(obj).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        if body:
-            self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+        except (ConnectionError, TimeoutError, OSError):
+            # Client parti pendant l'écriture : on abandonne cette réponse, la
+            # connexion sera fermée. Ne surtout pas laisser l'exception bloquer/tuer
+            # le thread de façon à figer le serveur.
+            self.close_connection = True
 
     def _auth_ok(self):
         if not TOKEN:

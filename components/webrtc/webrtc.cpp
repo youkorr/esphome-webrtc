@@ -881,14 +881,16 @@ bool WebRTCComponent::open_video_encoder_() {
   ecfg.fps = this->video_fps_;
   ecfg.res.width = this->enc_w_;
   ecfg.res.height = this->enc_h_;
-  // Bitrate: use the YAML override (video_bitrate) if set, else a default sized
-  // for the frame (w*h*fps/6 ~= 500 kbps at 640x480@10, up from the old /10). The
-  // hard ceiling is the ESP-Hosted C6 uplink; push video_bitrate up until you see
-  // SCTP "No buffer for TSN" / resets, then back off. qp bounds keep quality sane.
+  // Bitrate: use the YAML override (video_bitrate) if set, else the safe default
+  // w*h*fps/10 (~300 kbps at 640x480@10). The ESP-Hosted C6 uplink is the hard
+  // ceiling and it is LOW: field-tested, 600 kbps crashes and raising the bitrate
+  // did NOT improve quality (it is capped by resolution/qp, not bitrate). So keep
+  // the default conservative; video_bitrate lets you go even lower if your link
+  // is weak, or nudge up at your own risk.
   ecfg.rc.bitrate = (this->video_bitrate_ > 0)
                         ? this->video_bitrate_
-                        : (uint32_t) this->enc_w_ * this->enc_h_ * this->video_fps_ / 6;
-  ecfg.rc.qp_min = 20;
+                        : (uint32_t) this->enc_w_ * this->enc_h_ * this->video_fps_ / 10;
+  ecfg.rc.qp_min = 24;
   ecfg.rc.qp_max = 42;
   esp_h264_enc_handle_t enc = nullptr;
   esp_h264_err_t herr = esp_h264_enc_hw_new(&ecfg, &enc);
