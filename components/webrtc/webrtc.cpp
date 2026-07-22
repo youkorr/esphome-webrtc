@@ -230,10 +230,13 @@ static const uint8_t VIDEO_DC_MAGIC[4] = {'V', 'I', 'D', '0'};
 // ESP-Hosted (C6) link. Once frames get big the link can't keep up: SCTP starts
 // retransmitting (CRC errors), the receive buffer backs up ("No buffer for TSN")
 // and the stack faults. Measured ceiling with audio also flowing is ~11-13 KB
-// per frame; 13 KB matches the proven-stable operating point. Frames above this
-// cap are dropped (MJPEG is self-contained -> the next frame repairs the image)
-// and a throttled warning tells the user to lower jpeg_quality/fps/resolution.
-static const uint32_t MJPEG_DC_MAX_FRAME = 13000;
+// per frame. 15 KB: field-tested, calls run 1200+ frames at ~11-13 KB with only
+// harmless (retransmitted) CRC errors, so 13 KB was too tight and kept dropping
+// frames that only barely exceeded it (13009 B > 13000 B); 15 KB still stays well
+// clear of the ~30 KB frames that actually overflow SCTP and crash. Frames above
+// the cap are dropped (MJPEG is self-contained -> the next frame repairs it) with
+// a throttled warning to lower jpeg_quality/fps/resolution.
+static const uint32_t MJPEG_DC_MAX_FRAME = 15000;
 
 // Incoming data-channel messages: video frames (magic-prefixed) go to the video
 // path; anything else is application data.
