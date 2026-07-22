@@ -285,22 +285,97 @@ void ApprtcSignaling::poll_once_() {
 void ApprtcSignaling::poll_fn_(void *arg) {
   auto *self = static_cast<ApprtcSignaling *>(arg);
   self->poll_task_done_ = false;
+
+  // ONE persistent keep-alive HTTP connection for the whole poll loop. The loop
+  // hits the SAME URL (/msg/<room>/<client>) several times a second, GET (fetch)
+  // and POST (send), on the SAME task (so never two connections at once). The old
+  // code did esp_http_client_init/perform/cleanup PER request -> a fresh TCP
+  // connection every 300 ms. Over the ESP-Hosted C6 link (SDIO) that churn threw
+  // transient ESP_ERR_HTTP_CONNECT ("hard to connect, must retry several times").
+  // Reusing the connection removes the churn; we only reconnect on a real error.
+  const std::string url = self->msg_url_();
+  const bool is_https = url.rfind("https://", 0) == 0;
+  std::string resp;  // http_evt_ appends the response body here (via user_data)
+  esp_http_client_handle_t c = nullptr;
+
+  auto ensure_open = [&]() {
+    if (c != nullptr)
+      return;
+    esp_http_client_config_t cfg = {};
+    cfg.url = url.c_str();
+    cfg.timeout_ms = 8000;
+    cfg.event_handler = http_evt_;
+    cfg.user_data = &resp;
+    cfg.keep_alive_enable = true;  // TCP keepalive probes for the long-lived link
+    cfg.transport_type = is_https ? HTTP_TRANSPORT_OVER_SSL : HTTP_TRANSPORT_OVER_TCP;
+    if (is_https)
+      cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    c = esp_http_client_init(&cfg);
+    if (c != nullptr) {
+      esp_http_client_set_header(c, "Content-Type", "application/json");
+      if (!self->auth_token_.empty())
+        esp_http_client_set_header(c, "X-Auth-Token", self->auth_token_.c_str());
+    }
+  };
+
+  // Perform one request on the shared connection; on failure drop it so the next
+  // call reconnects (a half-open connection would keep failing otherwise).
+  auto do_req = [&](esp_http_client_method_t method, const std::string *body) -> bool {
+    ensure_open();
+    if (c == nullptr)
+      return false;
+    resp.clear();
+    esp_http_client_set_method(c, method);
+    esp_http_client_set_post_field(c, body ? body->c_str() : "", body ? (int) body->size() : 0);
+    esp_err_t err = esp_http_client_perform(c);
+    if (err != ESP_OK) {
+      esp_http_client_cleanup(c);
+      c = nullptr;
+      return false;
+    }
+    return true;
+  };
+
   while (self->poll_run_) {
-    // 1) Send anything queued by send_sdp/send_candidate. Done here (not on the
-    //    peer task) so only ONE TCP connection to the server is ever open at a
-    //    time — two concurrent connects were being reset by the peer.
+    // 1) Send anything queued by send_sdp/send_candidate (serialised here so only
+    //    ONE connection to the server is ever used).
     std::vector<std::string> pending;
     {
       std::lock_guard<std::mutex> lk(self->outbox_mtx_);
       pending.swap(self->outbox_);
     }
-    for (auto &p : pending) {
-      http_post_(self->msg_url_(), p, self->auth_token_);
+    size_t sent = 0;
+    for (; sent < pending.size(); sent++) {
+      if (!do_req(HTTP_METHOD_POST, &pending[sent]))
+        break;  // connection dropped mid-send: don't lose the rest
     }
-    // 2) Fetch incoming messages.
-    self->poll_once_();
+    if (sent < pending.size()) {
+      // Re-queue the unsent messages at the FRONT so they go out (in order) on the
+      // next iteration once the connection is re-established.
+      std::lock_guard<std::mutex> lk(self->outbox_mtx_);
+      self->outbox_.insert(self->outbox_.begin(), pending.begin() + sent, pending.end());
+    }
+
+    // 2) Fetch incoming messages and dispatch them.
+    if (do_req(HTTP_METHOD_GET, nullptr) && !resp.empty()) {
+      cJSON *root = cJSON_Parse(resp.c_str());
+      if (root != nullptr) {
+        cJSON *msgs = cJSON_GetObjectItem(root, "messages");
+        if (msgs != nullptr && cJSON_IsArray(msgs)) {
+          int n = cJSON_GetArraySize(msgs);
+          for (int i = 0; i < n; i++) {
+            cJSON *m = cJSON_GetArrayItem(msgs, i);
+            if (m != nullptr && cJSON_IsString(m) && m->valuestring != nullptr)
+              self->handle_ws_text_(m->valuestring, static_cast<int>(strlen(m->valuestring)));
+          }
+        }
+        cJSON_Delete(root);
+      }
+    }
     vTaskDelay(pdMS_TO_TICKS(300));
   }
+  if (c != nullptr)
+    esp_http_client_cleanup(c);
   self->poll_task_done_ = true;
   self->poll_task_ = nullptr;
   vTaskDelete(nullptr);
