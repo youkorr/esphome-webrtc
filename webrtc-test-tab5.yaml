@@ -192,10 +192,10 @@ external_components:
 webrtc:
   id: rtc
   room_id: "${room}"
-  role: caller                # Tab5 = celui qui APPELLE (offerer fixe).
-                              # Le Waveshare doit être en role: callee.
-                              # Ainsi le rôle ne dépend plus de l'ordre de
-                              # démarrage ni d'un client fantôme dans la room.
+  # role: PLUS BESOIN. Le rôle est automatique (défaut role: auto) : le serveur
+  # de signaling élit offerer/answerer tout seul (le 1er à rejoindre = offerer).
+  # Le MÊME firmware va sur les deux P4, aucun rôle à configurer, impossible de
+  # se tromper. (Option avancée seulement : role: caller/callee pour forcer.)
   # Signaling auto-hébergé (voir signaling-server/). Décommente pour ne plus
   # dépendre de webrtc.espressif.com. MÊME url + token sur les deux P4.
   # signaling_url: "http://192.168.1.12:8080"

@@ -318,22 +318,30 @@ void ApprtcSignaling::poll_fn_(void *arg) {
     }
   };
 
-  // Perform one request on the shared connection; on failure drop it so the next
-  // call reconnects (a half-open connection would keep failing otherwise).
+  // Perform one request on the shared connection. On failure the server/link may
+  // have reset the connection (the Unraid Docker resets intermittently), so drop
+  // it and retry with a FRESH connection a few times before giving up — this
+  // absorbs the transient "Connection reset by peer" that otherwise stalls
+  // signaling and forces the user to re-launch the whole call.
   auto do_req = [&](esp_http_client_method_t method, const std::string *body) -> bool {
-    ensure_open();
-    if (c == nullptr)
-      return false;
-    resp.clear();
-    esp_http_client_set_method(c, method);
-    esp_http_client_set_post_field(c, body ? body->c_str() : "", body ? (int) body->size() : 0);
-    esp_err_t err = esp_http_client_perform(c);
-    if (err != ESP_OK) {
-      esp_http_client_cleanup(c);
-      c = nullptr;
-      return false;
+    for (int attempt = 0; attempt < 4; attempt++) {
+      ensure_open();
+      if (c != nullptr) {
+        resp.clear();
+        esp_http_client_set_method(c, method);
+        esp_http_client_set_post_field(c, body ? body->c_str() : "",
+                                       body ? (int) body->size() : 0);
+        if (esp_http_client_perform(c) == ESP_OK)
+          return true;
+      }
+      // Reset the (half-open) connection and back off briefly before retrying.
+      if (c != nullptr) {
+        esp_http_client_cleanup(c);
+        c = nullptr;
+      }
+      vTaskDelay(pdMS_TO_TICKS(150 * (attempt + 1)));  // 150,300,450 ms
     }
-    return true;
+    return false;
   };
 
   while (self->poll_run_) {
