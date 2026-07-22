@@ -42,6 +42,7 @@ CONF_VIDEO_WIDTH = "video_width"
 CONF_VIDEO_HEIGHT = "video_height"
 CONF_FPS = "fps"
 CONF_JPEG_QUALITY = "jpeg_quality"
+CONF_VIDEO_BITRATE = "video_bitrate"
 CONF_ENABLE_DATA_CHANNEL = "enable_data_channel"
 CONF_AUTO_START = "auto_start"
 CONF_ICE_SERVERS = "ice_servers"
@@ -159,6 +160,10 @@ CONFIG_SCHEMA = cv.All(
             # and crash the link; keep this low enough that frames stay well under
             # ~24 KB at your chosen resolution/fps (~40 works for 640x480).
             cv.Optional(CONF_JPEG_QUALITY, default=40): cv.int_range(min=10, max=90),
+            # H.264 target bitrate in bits/s. 0 = auto (w*h*fps/6). Raise for more
+            # quality/débit until the ESP-Hosted C6 link chokes (SCTP "No buffer
+            # for TSN" / resets), then back off. e.g. 600000 = 600 kbps.
+            cv.Optional(CONF_VIDEO_BITRATE, default=0): cv.int_range(min=0, max=4000000),
             cv.Optional(CONF_ENABLE_DATA_CHANNEL, default=True): cv.boolean,
             cv.Optional(CONF_AUTO_START, default=False): cv.boolean,
             # fdaudio audio bridge: share fdaudio's mic + speaker (via the ESPHome
@@ -216,6 +221,7 @@ async def to_code(config):
         )
     )
     cg.add(var.set_jpeg_quality(config[CONF_JPEG_QUALITY]))
+    cg.add(var.set_video_bitrate(config[CONF_VIDEO_BITRATE]))
     cg.add(var.set_enable_data_channel(config[CONF_ENABLE_DATA_CHANNEL]))
     cg.add(var.set_auto_start(config[CONF_AUTO_START]))
 

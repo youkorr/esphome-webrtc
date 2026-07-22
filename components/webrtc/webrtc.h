@@ -82,6 +82,7 @@ class WebRTCComponent : public Component {
   void set_video_direction(MediaDir d) { this->video_dir_ = d; }
   void set_audio_direction(MediaDir d) { this->audio_dir_ = d; }
   void set_jpeg_quality(uint8_t q) { this->jpeg_quality_ = q; }
+  void set_video_bitrate(uint32_t b) { this->video_bitrate_ = b; }
   void set_video_resolution(uint16_t w, uint16_t h, uint8_t fps) {
     this->video_w_ = w;
     this->video_h_ = h;
@@ -180,6 +181,7 @@ class WebRTCComponent : public Component {
   // channel, whose buffers overflow (crash) if frames are too big for the
   // ESP-Hosted WiFi link, so default conservatively.
   uint8_t jpeg_quality_{40};
+  uint32_t video_bitrate_{0};  // H.264 target bitrate (bps); 0 = auto from w*h*fps
   bool enable_data_channel_{true};
   bool auto_start_{false};
   bool auto_start_attempted_{false};
