@@ -144,6 +144,8 @@ class WebRTCComponent : public Component {
 
  protected:
   bool open_peer_();
+  static void start_task_(void *arg);  // runs do_start_ off the main loop
+  void do_start_();                    // the blocking join + peer setup
   static void task_fn_(void *arg);       // runs esp_peer main_loop
   static void audio_tx_fn_(void *arg);   // mic ring -> G.711/Opus -> esp_peer send_audio
   bool open_opus_();                     // esp_audio_codec Opus encoder + decoder
@@ -319,6 +321,7 @@ class WebRTCComponent : public Component {
   void *task_{nullptr};       // TaskHandle_t
   volatile bool run_{false};
   bool started_{false};
+  std::atomic<bool> connecting_{false};  // start() task in flight (don't double-spawn)
   std::atomic<bool> connected_{false};
   std::atomic<uint32_t> pending_states_{0};
 

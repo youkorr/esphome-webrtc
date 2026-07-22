@@ -1676,9 +1676,24 @@ void WebRTCComponent::stop_audio_bridge_() {
 }
 
 void WebRTCComponent::start() {
-  if (this->started_) {
+  if (this->started_ || this->connecting_.load()) {
     return;
   }
+  // Run the (blocking) join + peer setup on a one-shot task so the ESPHome main
+  // loop is NEVER blocked. start() is called from the button action / auto_start
+  // ON THE MAIN LOOP; a failing join retries with vTaskDelay for many seconds,
+  // which starved loopTask -> "task_wdt: loopTask" crash. The task lets the loop
+  // stay alive while signaling connects (or keeps retrying) in the background.
+  this->connecting_.store(true);
+  xTaskCreatePinnedToCore(start_task_, "webrtc_start", 20480, this, 4, nullptr, 0);
+}
+
+void WebRTCComponent::start_task_(void *arg) {
+  static_cast<WebRTCComponent *>(arg)->do_start_();
+  vTaskDelete(nullptr);
+}
+
+void WebRTCComponent::do_start_() {
   // 1) Join the room first, so we know whether we offer or answer.
   // Retry a few times: a crashed/rebooted peer can leave a ghost that makes the
   // join look "full" until the server expires it. A short retry rides that out.
@@ -1704,6 +1719,7 @@ void WebRTCComponent::start() {
   }
   if (!joined) {
     ESP_LOGE(TAG, "signaling join failed (room full or unreachable)");
+    this->connecting_.store(false);  // release the guard so the user can retry
     return;
   }
   this->controlled_ = !this->signaling_.is_initiator();
@@ -1719,6 +1735,7 @@ void WebRTCComponent::start() {
 
   // 2) Open the peer with the correct role.
   if (!this->open_peer_()) {
+    this->connecting_.store(false);
     return;
   }
   const esp_peer_ops_t *ops = static_cast<const esp_peer_ops_t *>(this->ops_);
@@ -1833,6 +1850,7 @@ void WebRTCComponent::start() {
   // emitted its offer from new_connection above).
   this->signaling_.connect();
   this->started_ = true;
+  this->connecting_.store(false);
 }
 
 void WebRTCComponent::stop() {
