@@ -236,7 +236,7 @@ static const uint8_t VIDEO_DC_MAGIC[4] = {'V', 'I', 'D', '0'};
 // clear of the ~30 KB frames that actually overflow SCTP and crash. Frames above
 // the cap are dropped (MJPEG is self-contained -> the next frame repairs it) with
 // a throttled warning to lower jpeg_quality/fps/resolution.
-static const uint32_t MJPEG_DC_MAX_FRAME = 85000;
+static const uint32_t MJPEG_DC_MAX_FRAME = 100000;
 
 // Incoming data-channel messages: video frames (magic-prefixed) go to the video
 // path; anything else is application data.
