@@ -1045,10 +1045,10 @@ void WebRTCComponent::pump_mjpeg_tx_() {
   }
   cam->release_buffer(fb);  // done reading the camera buffer; free it to re-queue
   const size_t need = (size_t) ew * (size_t) eh * 2;
-  // CPU wrote jpeg_in_ (cacheable PSRAM); flush so the JPEG encoder's DMA reads
-  // fresh pixels.
-  esp_cache_msync(this->jpeg_in_, need,
-                  ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+  // No esp_cache_msync here: jpeg_alloc_encoder_mem() buffers are not guaranteed
+  // 64-byte aligned, so msync spams "not aligned with cache line size". The HW
+  // JPEG encoder handles coherency for its own alloc'd input (face2face writes
+  // the CPU-scaled pixels straight in and encodes with no flush, proven stable).
 
   jpeg_encode_cfg_t jc = {};
   jc.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
