@@ -226,7 +226,7 @@ async def to_code(config):
     )
     # Bidirectional A/V + ICE candidate gathering opens many concurrent UDP
     # sockets; the IDF defaults are too low (matches upstream videocall_demo).
-    #add_idf_sdkconfig_option("CONFIG_LWIP_MAX_UDP_PCBS", 1024)
+    add_idf_sdkconfig_option("CONFIG_LWIP_MAX_UDP_PCBS", 1024)
     add_idf_sdkconfig_option("CONFIG_LWIP_UDP_RECVMBOX_SIZE", 64)
     add_idf_sdkconfig_option("CONFIG_LWIP_TCPIP_RECVMBOX_SIZE", 64)
 
