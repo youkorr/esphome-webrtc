@@ -515,6 +515,14 @@ bool WebRTCComponent::open_peer_() {
   }
 
   esp_peer_default_cfg_t default_cfg = {};
+  // Data-channel caches, copied from Espressif's videocall_demo (which also sends
+  // MJPEG over the data channel): 400 kB each. The esp_peer DEFAULT is only 100 kB
+  // (esp_peer_default.h), and at 640x480/10 fps we push ~120 kB/s — so the send
+  // cache filled up permanently and most frames were dropped/stalled: video felt
+  // like ~4 fps however low we set the resolution, plus the "No buffer for TSN"
+  // overflow. 400 kB gives ~3 s of slack to ride out ESP-Hosted link hiccups.
+  default_cfg.data_ch_cfg.send_cache_size = 400 * 1024;
+  default_cfg.data_ch_cfg.recv_cache_size = 400 * 1024;
 
   esp_peer_cfg_t cfg = {};
   cfg.server_lists = static_cast<esp_peer_ice_server_cfg_t *>(this->ice_cfgs_);
@@ -529,10 +537,20 @@ bool WebRTCComponent::open_peer_() {
   // G.711 is fixed 8 kHz mono; Opus is 16 kHz mono.
   cfg.audio_info.sample_rate = (this->audio_codec_ == AUDIO_CODEC_OPUS) ? 16000 : G711_RATE;
   cfg.audio_info.channel = 1;
-  cfg.video_info.codec = to_peer_video(this->video_codec_);
-  cfg.video_info.width = this->video_w_;
-  cfg.video_info.height = this->video_h_;
-  cfg.video_info.fps = this->video_fps_;
+  // Video stream info is declared ONLY when video would ride RTP. We ship video
+  // over the data channel (like Espressif's videocall_demo), and esp_webrtc does
+  // exactly this: with video_over_data_channel it leaves peer_cfg.video_info
+  // zeroed (esp_webrtc.c: the memcpy of video_info is skipped). Declaring it
+  // anyway made esp_peer negotiate a video m-line it then marked a=inactive AND
+  // allocate an RTP video jitter buffer we never read (400 kB by default) — pure
+  // waste on top of the useless m-line.
+  const bool video_over_dc = this->enable_data_channel_;
+  if (!video_over_dc) {
+    cfg.video_info.codec = to_peer_video(this->video_codec_);
+    cfg.video_info.width = this->video_w_;
+    cfg.video_info.height = this->video_h_;
+    cfg.video_info.fps = this->video_fps_;
+  }
   cfg.enable_data_channel = this->enable_data_channel_;
   cfg.no_auto_reconnect = true;
   cfg.extra_cfg = &default_cfg;
