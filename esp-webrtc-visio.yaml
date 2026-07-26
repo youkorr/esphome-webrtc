@@ -71,6 +71,13 @@ esp32:
       CONFIG_LWIP_TCP_RECVMBOX_SIZE: "64"
 
 logger:
+  # PERFORMANCE : le logger écrit de façon BLOQUANTE sur la boucle principale, la
+  # même qui encode/décode la vidéo. En DEBUG le flot esp-idf (SCTP/AGENT) sort à
+  # chaque frame et bloque >100 ms -> vidéo saccadée. Garde INFO pour la visio.
+  level: INFO
+  logs:
+    esp-idf: WARN
+    component: ERROR
 
 api:
   encryption:

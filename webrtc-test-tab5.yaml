@@ -134,6 +134,16 @@ update:
 
 logger:
   hardware_uart: USB_SERIAL_JTAG
+  # PERFORMANCE : le logger écrit de façon BLOQUANTE sur la boucle principale —
+  # celle qui encode/décode la vidéo. En DEBUG (le défaut) le flot esp-idf
+  # (SCTP: CRC error, AGENT: ...) sortait à chaque frame et on voyait
+  # "logger took a long time for an operation (122 ms)" : plus qu'une période de
+  # frame entière à 10 fps -> vidéo saccadée. INFO + esp-idf muet = boucle libre.
+  # Repasse en DEBUG seulement pour diagnostiquer (et attends-toi aux saccades).
+  level: INFO
+  logs:
+    esp-idf: WARN          # coupe le flot SCTP/AGENT/ICE (très verbeux)
+    component: ERROR       # coupe les "took a long time" (informatif, pas utile ici)
 
 external_components:
   - source:
