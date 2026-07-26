@@ -37,6 +37,7 @@ extern "C" {
 #ifdef USE_ESP_WEBRTC_VIDEO
 #include "driver/ppa.h"
 #include "esp_cache.h"
+#include "esp_timer.h"  // esp_timer_get_time() for the per-phase MJPEG timings
 extern "C" {
 #include "esp_h264_enc_single.h"
 #include "esp_h264_enc_single_hw.h"
@@ -1033,23 +1034,39 @@ void WebRTCComponent::pump_mjpeg_tx_() {
   // 16.16 fixed-point source walk (no per-pixel divide, no PPA -> no DMA2D
   // contention with the JPEG decoder). Works for ANY sensor size and any target,
   // arbitrary ratio (not just integer 1/N), so video_width/height stay exact.
-  {
+  const int64_t t_scale0 = esp_timer_get_time();
+  if (w == ew && h == eh) {
+    // Fast path: camera already delivers exactly the target size -> one bulk copy
+    // instead of 300k+ per-pixel reads. Set the camera resolution equal to
+    // video_width/height to land here (much cheaper).
+    memcpy(this->jpeg_in_, rgb, (size_t) ew * (size_t) eh * 2);
+  } else {
     const uint16_t *src = reinterpret_cast<const uint16_t *>(rgb);
     uint16_t *dst = static_cast<uint16_t *>(this->jpeg_in_);
     const uint32_t dx_fp = ((uint32_t) w << 16) / (uint32_t) ew;
     const uint32_t dy_fp = ((uint32_t) h << 16) / (uint32_t) eh;
     uint32_t sy_fp = 0;
-    for (int y = 0; y < eh; y++) {
-      const uint16_t *srow = src + (size_t) (sy_fp >> 16) * (size_t) w;
-      uint16_t *drow = dst + (size_t) y * (size_t) ew;
-      uint32_t sx_fp = 0;
-      for (int x = 0; x < ew; x++) {
-        drow[x] = srow[sx_fp >> 16];
-        sx_fp += dx_fp;
+    if (dx_fp == 0x10000) {
+      // Same width, only vertical decimation: copy whole rows (bulk, cache-friendly).
+      for (int y = 0; y < eh; y++) {
+        memcpy(dst + (size_t) y * (size_t) ew, src + (size_t) (sy_fp >> 16) * (size_t) w,
+               (size_t) ew * 2);
+        sy_fp += dy_fp;
       }
-      sy_fp += dy_fp;
+    } else {
+      for (int y = 0; y < eh; y++) {
+        const uint16_t *srow = src + (size_t) (sy_fp >> 16) * (size_t) w;
+        uint16_t *drow = dst + (size_t) y * (size_t) ew;
+        uint32_t sx_fp = 0;
+        for (int x = 0; x < ew; x++) {
+          drow[x] = srow[sx_fp >> 16];
+          sx_fp += dx_fp;
+        }
+        sy_fp += dy_fp;
+      }
     }
   }
+  const int64_t t_scale1 = esp_timer_get_time();
   cam->release_buffer(fb);  // done reading the camera buffer; free it to re-queue
   const size_t need = (size_t) ew * (size_t) eh * 2;
   // No esp_cache_msync here: jpeg_alloc_encoder_mem() buffers are not guaranteed
@@ -1074,6 +1091,7 @@ void WebRTCComponent::pump_mjpeg_tx_() {
                                       this->h264_buf_size_, &enc_len);
   if (this->jpeg_mutex_ != nullptr)
     xSemaphoreGive(static_cast<SemaphoreHandle_t>(this->jpeg_mutex_));
+  const int64_t t_enc1 = esp_timer_get_time();
   if (je != ESP_OK || enc_len == 0) {
     if (now - this->last_enc_warn_ms_ > 1000) {
       this->last_enc_warn_ms_ = now;
@@ -1120,9 +1138,17 @@ void WebRTCComponent::pump_mjpeg_tx_() {
   int vret = 0;
   if (ops != nullptr && ops->send_data != nullptr && handle != nullptr)
     vret = ops->send_data(handle, &df);
+  const int64_t t_send1 = esp_timer_get_time();
+  // Per-phase timings: this whole function runs on the MAIN LOOP, so its total is
+  // exactly how long LVGL is blocked each TX frame. scale= CPU resize, enc= HW JPEG
+  // (also waits on the shared codec), send= SCTP/ESP-Hosted push.
   if ((this->video_tx_count_++ % 30) == 0)
-    ESP_LOGI(TAG, "video TX: %u frames (MJPEG %dx%d, %u bytes via DC, ret=%d)",
-             (unsigned) this->video_tx_count_, ew, eh, (unsigned) enc_len, vret);
+    ESP_LOGI(TAG,
+             "video TX: %u frames (MJPEG %dx%d, %u B via DC, ret=%d) "
+             "scale=%ums enc=%ums send=%ums%s",
+             (unsigned) this->video_tx_count_, ew, eh, (unsigned) enc_len, vret,
+             (unsigned) ((t_scale1 - t_scale0) / 1000), (unsigned) ((t_enc1 - t_scale1) / 1000),
+             (unsigned) ((t_send1 - t_enc1) / 1000), (w == ew && h == eh) ? " [nocopy]" : "");
 }
 
 void WebRTCComponent::video_tx_fn_(void *arg) {
@@ -1413,6 +1439,7 @@ void WebRTCComponent::render_remote_frame_() {
   dc.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
   uint32_t outlen = 0;
   // Serialise with the video_tx encoder (shared HW JPEG peripheral).
+  const int64_t t_dec0 = esp_timer_get_time();
   if (this->jpeg_mutex_ != nullptr)
     xSemaphoreTake(static_cast<SemaphoreHandle_t>(this->jpeg_mutex_), portMAX_DELAY);
   esp_err_t de = jpeg_decoder_process(static_cast<jpeg_decoder_handle_t>(this->jdec_), &dc,
@@ -1430,14 +1457,25 @@ void WebRTCComponent::render_remote_frame_() {
   // pixels (same M2C sync the camera->canvas path uses).
   esp_cache_msync(this->remote_rgb_, need,
                   ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+  const int64_t t_dec1 = esp_timer_get_time();
   // The HW JPEG decoder emits RGB565 with a byte order LVGL reads swapped
   // (psychedelic magenta/cyan colors). Swap the two bytes of each pixel in
-  // place, exactly like face2face's proven swap_colors_ path.
+  // place, exactly like face2face's proven swap_colors_ path — but 2 pixels per
+  // 32-bit word: half the iterations and half the PSRAM transactions of a 16-bit
+  // loop, which matters because this runs on the main loop for every frame
+  // (640x480 = 307200 pixels).
   {
-    uint16_t *px = static_cast<uint16_t *>(this->remote_rgb_);
-    size_t n = need / 2;
-    for (size_t i = 0; i < n; i++)
-      px[i] = (uint16_t) ((px[i] >> 8) | (px[i] << 8));
+    uint32_t *w32 = static_cast<uint32_t *>(this->remote_rgb_);
+    const size_t npx = need / 2;
+    const size_t n32 = npx >> 1;
+    for (size_t i = 0; i < n32; i++) {
+      uint32_t v = w32[i];
+      w32[i] = ((v & 0xFF00FF00u) >> 8) | ((v & 0x00FF00FFu) << 8);
+    }
+    if (npx & 1) {  // odd trailing pixel
+      uint16_t *last = static_cast<uint16_t *>(this->remote_rgb_) + npx - 1;
+      *last = (uint16_t) ((*last >> 8) | (*last << 8));
+    }
   }
 
   auto *canvas = static_cast<lv_obj_t *>(this->remote_canvas_);
@@ -1457,9 +1495,13 @@ void WebRTCComponent::render_remote_frame_() {
     db->data = static_cast<uint8_t *>(this->remote_rgb_);
   }
   lv_obj_invalidate(canvas);
+  const int64_t t_swap1 = esp_timer_get_time();
+  // dec= HW JPEG decode (+ wait on the shared codec), swap= RGB565 byte swap. Both
+  // run on the MAIN LOOP, so dec+swap is added to LVGL's blocked time every frame.
   if ((this->video_rx_count_++ % 30) == 0)
-    ESP_LOGI(TAG, "video RX: %u frames (%ux%u, %d bytes JPEG)", (unsigned) this->video_rx_count_,
-             (unsigned) pi.width, (unsigned) pi.height, jsize);
+    ESP_LOGI(TAG, "video RX: %u frames (%ux%u, %d B JPEG) dec=%ums swap=%ums",
+             (unsigned) this->video_rx_count_, (unsigned) pi.width, (unsigned) pi.height, jsize,
+             (unsigned) ((t_dec1 - t_dec0) / 1000), (unsigned) ((t_swap1 - t_dec1) / 1000));
 #endif  // USE_LVGL
 }
 
