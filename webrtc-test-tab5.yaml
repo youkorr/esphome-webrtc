@@ -345,9 +345,18 @@ esp_cam_sensor:
   id: tab5_cam
   i2c_id: bsp_bus
   sensor_type: sc2356        #"sensor_type" au lieu de "sensor"
-  resolution: "1280x720"           # , 1024x600 ,"800x600" 
-  pixel_format: "RGB565"      # Zero-copy 
-  framerate: 30
+  # METS LA MÊME TAILLE QUE video_width x video_height du bloc webrtc !
+  # Si la caméra sort déjà la taille envoyée, le composant encode DIRECTEMENT le
+  # buffer de la caméra (log: "[zero-copy]") : plus aucun redimensionnement.
+  # Mesuré à 1280x720 -> 640x480 : le scale CPU coûtait 26 ms sur la boucle
+  # principale À CHAQUE frame (le poste le plus lourd, limité par la bande passante
+  # PSRAM) -> vidéo saccadée. En zero-copy ce coût tombe à ~0.
+  resolution: "640x480"            # = video_width x video_height -> zero-copy
+  pixel_format: "RGB565"      # Zero-copy
+  # framerate: la caméra écrit CHAQUE frame en PSRAM même si on n'en envoie que
+  # fps/s. À 30 fps en 1280x720 c'était ~55 Mo/s de PSRAM gaspillés (partagés avec
+  # l'écran MIPI et les DMA JPEG). Colle-le au fps du bloc webrtc.
+  framerate: 15
   jpeg_quality: 15
   mirror_x: false    # Flip horizontal (hardware) - laisse false (voir ppa_enabled)
   mirror_y: false    # Flip vertical - laisse false (voir ppa_enabled)

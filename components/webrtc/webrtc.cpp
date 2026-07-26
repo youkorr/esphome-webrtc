@@ -1053,11 +1053,18 @@ void WebRTCComponent::pump_mjpeg_tx_() {
   // contention with the JPEG decoder). Works for ANY sensor size and any target,
   // arbitrary ratio (not just integer 1/N), so video_width/height stay exact.
   const int64_t t_scale0 = esp_timer_get_time();
-  if (w == ew && h == eh) {
-    // Fast path: camera already delivers exactly the target size -> one bulk copy
-    // instead of 300k+ per-pixel reads. Set the camera resolution equal to
-    // video_width/height to land here (much cheaper).
-    memcpy(this->jpeg_in_, rgb, (size_t) ew * (size_t) eh * 2);
+  // ZERO-COPY fast path: when the camera already delivers exactly the target size
+  // we feed the camera's own V4L2 buffer to the JPEG encoder — no scale, no copy
+  // at all (measured: the scale phase was 26 ms of the ~55 ms this function costs
+  // the main loop, and it is PSRAM-bandwidth bound, so the only real cure is not
+  // touching the pixels). Legal because the encoder INPUT only needs to be a
+  // DMA-capable 64-byte-aligned PSRAM buffer (only the OUTPUT must come from
+  // jpeg_alloc_encoder_mem), and the camera allocates its buffers 64-byte aligned.
+  // Set the camera resolution == video_width/height to land here.
+  const bool zero_copy = (w == ew && h == eh);
+  const uint8_t *enc_src = static_cast<const uint8_t *>(this->jpeg_in_);
+  if (zero_copy) {
+    enc_src = rgb;  // encode straight out of the camera buffer
   } else {
     const uint16_t *src = reinterpret_cast<const uint16_t *>(rgb);
     uint16_t *dst = static_cast<uint16_t *>(this->jpeg_in_);
@@ -1085,7 +1092,12 @@ void WebRTCComponent::pump_mjpeg_tx_() {
     }
   }
   const int64_t t_scale1 = esp_timer_get_time();
-  cam->release_buffer(fb);  // done reading the camera buffer; free it to re-queue
+  // In copy/scale mode the pixels are already in our own buffer, so give the
+  // camera buffer back NOW (the sensor only has 2; holding one starves it). In
+  // zero-copy mode the encoder reads straight from it, so it must stay held until
+  // after jpeg_encoder_process below.
+  if (!zero_copy)
+    cam->release_buffer(fb);
   const size_t need = (size_t) ew * (size_t) eh * 2;
   // No esp_cache_msync here: jpeg_alloc_encoder_mem() buffers are not guaranteed
   // 64-byte aligned, so msync spams "not aligned with cache line size". The HW
@@ -1104,12 +1116,14 @@ void WebRTCComponent::pump_mjpeg_tx_() {
   if (this->jpeg_mutex_ != nullptr)
     xSemaphoreTake(static_cast<SemaphoreHandle_t>(this->jpeg_mutex_), portMAX_DELAY);
   esp_err_t je = jpeg_encoder_process(static_cast<jpeg_encoder_handle_t>(this->jenc_), &jc,
-                                      static_cast<uint8_t *>(this->jpeg_in_), need,
+                                      const_cast<uint8_t *>(enc_src), need,
                                       static_cast<uint8_t *>(this->h264_buf_),
                                       this->h264_buf_size_, &enc_len);
   if (this->jpeg_mutex_ != nullptr)
     xSemaphoreGive(static_cast<SemaphoreHandle_t>(this->jpeg_mutex_));
   const int64_t t_enc1 = esp_timer_get_time();
+  if (zero_copy)
+    cam->release_buffer(fb);  // encoder is done reading the camera buffer
   if (je != ESP_OK || enc_len == 0) {
     if (now - this->last_enc_warn_ms_ > 1000) {
       this->last_enc_warn_ms_ = now;
@@ -1166,7 +1180,7 @@ void WebRTCComponent::pump_mjpeg_tx_() {
              "scale=%ums enc=%ums send=%ums%s",
              (unsigned) this->video_tx_count_, ew, eh, (unsigned) enc_len, vret,
              (unsigned) ((t_scale1 - t_scale0) / 1000), (unsigned) ((t_enc1 - t_scale1) / 1000),
-             (unsigned) ((t_send1 - t_enc1) / 1000), (w == ew && h == eh) ? " [nocopy]" : "");
+             (unsigned) ((t_send1 - t_enc1) / 1000), zero_copy ? " [zero-copy]" : "");
 }
 
 void WebRTCComponent::video_tx_fn_(void *arg) {
