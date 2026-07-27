@@ -1390,10 +1390,16 @@ bool WebRTCComponent::open_jpeg_decoder_() {
   size_t go = 0;
   this->remote_rgb_ = jpeg_alloc_decoder_mem(cap, &outcfg, &go);
   this->remote_rgb_cap_ = (go > 0) ? go : cap;
-  if (this->jpeg_dec_in_ == nullptr || this->remote_rgb_ == nullptr) {
+  // Second output buffer: decode+swap runs on the mjpeg_rx task while LVGL draws
+  // the other one, so the 41 ms byte swap no longer blocks the main loop.
+  size_t go2 = 0;
+  this->remote_rgb_front_ = jpeg_alloc_decoder_mem(cap, &outcfg, &go2);
+  if (this->jpeg_dec_in_ == nullptr || this->remote_rgb_ == nullptr ||
+      this->remote_rgb_front_ == nullptr) {
     ESP_LOGE(TAG, "JPEG dec buffers alloc failed (cap=%u)", (unsigned) cap);
     return false;
   }
+  memset(this->remote_rgb_front_, 0, this->remote_rgb_cap_);
 #ifdef USE_LVGL
   if (this->remote_draw_buf_ == nullptr)
     this->remote_draw_buf_ = new lv_draw_buf_t{};
@@ -1432,110 +1438,150 @@ void WebRTCComponent::render_remote_frame_() {
     return;
   }
 
-  if (this->video_codec_ != VIDEO_CODEC_MJPEG || !this->jpeg_rx_ready_ ||
-      this->jpeg_rx_mtx_ == nullptr)
+  // MJPEG: the mjpeg_rx task decoded AND byte-swapped a frame into the back buffer;
+  // all the main loop does here is flip the buffers and repoint the canvas. The
+  // heavy work (dec ~5 ms + swap up to 41 ms on slower PSRAM) used to run right
+  // here and was the dominant source of the choppiness.
+  if (this->video_codec_ != VIDEO_CODEC_MJPEG)
     return;
-  if (this->jdec_ == nullptr && !this->open_jpeg_decoder_())
+  if (!this->rgb_ready_.load(std::memory_order_acquire))
     return;
-
-  auto mtx = static_cast<SemaphoreHandle_t>(this->jpeg_rx_mtx_);
-  if (xSemaphoreTake(mtx, 0) != pdTRUE)
-    return;  // peer task is mid-copy; catch it next loop
-  int jsize = this->jpeg_rx_size_;
-  this->jpeg_rx_ready_ = false;
-  bool ok = (jsize > 0 && (size_t) jsize <= this->jpeg_dec_in_cap_);
-  if (ok)
-    memcpy(this->jpeg_dec_in_, this->jpeg_rx_buf_, jsize);
-  xSemaphoreGive(mtx);
-  if (!ok) {
-    if (jsize > 0)
-      ESP_LOGW(TAG, "remote JPEG too big for buffer (%d > %u)", jsize,
-               (unsigned) this->jpeg_dec_in_cap_);
+  const uint16_t pw = this->rmt_pub_w_;
+  const uint16_t ph = this->rmt_pub_h_;
+  const size_t need = (size_t) pw * (size_t) ph * 2;
+  if (pw == 0 || ph == 0 || need == 0) {
+    this->rgb_ready_.store(false, std::memory_order_release);
     return;
   }
-
-  jpeg_decode_picture_info_t pi = {};
-  if (jpeg_decoder_get_info(static_cast<uint8_t *>(this->jpeg_dec_in_), jsize, &pi) != ESP_OK)
-    return;
-  size_t need = (size_t) pi.width * pi.height * 2;
-  if (need == 0 || need > this->remote_rgb_cap_) {
-    if ((this->video_rx_count_ % 100) == 0)
-      ESP_LOGW(TAG, "remote frame %ux%u exceeds RGB buffer", (unsigned) pi.width,
-               (unsigned) pi.height);
-    return;
-  }
-
-  jpeg_decode_cfg_t dc = {};
-  dc.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
-  dc.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
-  dc.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
-  uint32_t outlen = 0;
-  // Serialise with the video_tx encoder (shared HW JPEG peripheral).
-  const int64_t t_dec0 = esp_timer_get_time();
-  if (this->jpeg_mutex_ != nullptr)
-    xSemaphoreTake(static_cast<SemaphoreHandle_t>(this->jpeg_mutex_), portMAX_DELAY);
-  esp_err_t de = jpeg_decoder_process(static_cast<jpeg_decoder_handle_t>(this->jdec_), &dc,
-                                      static_cast<uint8_t *>(this->jpeg_dec_in_), jsize,
-                                      static_cast<uint8_t *>(this->remote_rgb_),
-                                      this->remote_rgb_cap_, &outlen);
-  if (this->jpeg_mutex_ != nullptr)
-    xSemaphoreGive(static_cast<SemaphoreHandle_t>(this->jpeg_mutex_));
-  if (de != ESP_OK) {
-    if ((this->video_rx_count_ % 100) == 0)
-      ESP_LOGW(TAG, "jpeg decode failed: %s", esp_err_to_name(de));
-    return;
-  }
-  // The decoder DMAs into PSRAM; invalidate the CPU cache so LVGL reads fresh
-  // pixels (same M2C sync the camera->canvas path uses).
-  esp_cache_msync(this->remote_rgb_, need,
-                  ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
-  const int64_t t_dec1 = esp_timer_get_time();
-  // The HW JPEG decoder emits RGB565 with a byte order LVGL reads swapped
-  // (psychedelic magenta/cyan colors). Swap the two bytes of each pixel in
-  // place, exactly like face2face's proven swap_colors_ path — but 2 pixels per
-  // 32-bit word: half the iterations and half the PSRAM transactions of a 16-bit
-  // loop, which matters because this runs on the main loop for every frame
-  // (640x480 = 307200 pixels).
-  {
-    uint32_t *w32 = static_cast<uint32_t *>(this->remote_rgb_);
-    const size_t npx = need / 2;
-    const size_t n32 = npx >> 1;
-    for (size_t i = 0; i < n32; i++) {
-      uint32_t v = w32[i];
-      w32[i] = ((v & 0xFF00FF00u) >> 8) | ((v & 0x00FF00FFu) << 8);
-    }
-    if (npx & 1) {  // odd trailing pixel
-      uint16_t *last = static_cast<uint16_t *>(this->remote_rgb_) + npx - 1;
-      *last = (uint16_t) ((*last >> 8) | (*last << 8));
-    }
-  }
+  // Flip: what the task just filled becomes the displayed buffer.
+  void *tmp = this->remote_rgb_front_;
+  this->remote_rgb_front_ = this->remote_rgb_;
+  this->remote_rgb_ = tmp;
+  this->rgb_ready_.store(false, std::memory_order_release);
 
   auto *canvas = static_cast<lv_obj_t *>(this->remote_canvas_);
   auto *db = static_cast<lv_draw_buf_t *>(this->remote_draw_buf_);
-  const uint32_t stride = (uint32_t) pi.width * 2;
-  if (!this->remote_draw_buf_init_ || this->rmt_w_ != pi.width || this->rmt_h_ != pi.height) {
-    lv_draw_buf_init(db, pi.width, pi.height, LV_COLOR_FORMAT_RGB565, stride, this->remote_rgb_,
-                     need);
+  const uint32_t stride = (uint32_t) pw * 2;
+  if (!this->remote_draw_buf_init_ || this->rmt_w_ != pw || this->rmt_h_ != ph) {
+    lv_draw_buf_init(db, pw, ph, LV_COLOR_FORMAT_RGB565, stride, this->remote_rgb_front_, need);
     lv_draw_buf_set_flag(db, LV_IMAGE_FLAGS_MODIFIABLE);
     lv_canvas_set_draw_buf(canvas, db);
     this->remote_draw_buf_init_ = true;
-    this->rmt_w_ = pi.width;
-    this->rmt_h_ = pi.height;
-    ESP_LOGI(TAG, "remote canvas draw_buf %ux%u (stride %u)", (unsigned) pi.width,
-             (unsigned) pi.height, (unsigned) stride);
+    this->rmt_w_ = pw;
+    this->rmt_h_ = ph;
+    ESP_LOGI(TAG, "remote canvas draw_buf %ux%u (stride %u)", (unsigned) pw, (unsigned) ph,
+             (unsigned) stride);
   } else {
-    db->data = static_cast<uint8_t *>(this->remote_rgb_);
+    db->data = static_cast<uint8_t *>(this->remote_rgb_front_);
   }
   lv_obj_invalidate(canvas);
-  const int64_t t_swap1 = esp_timer_get_time();
-  // dec= HW JPEG decode (+ wait on the shared codec), swap= RGB565 byte swap. Both
-  // run on the MAIN LOOP, so dec+swap is added to LVGL's blocked time every frame.
-  if ((this->video_rx_count_++ % 30) == 0)
-    ESP_LOGI(TAG, "video RX: %u frames (%ux%u, %d B JPEG) dec=%ums swap=%ums",
-             (unsigned) this->video_rx_count_, (unsigned) pi.width, (unsigned) pi.height, jsize,
-             (unsigned) ((t_dec1 - t_dec0) / 1000), (unsigned) ((t_swap1 - t_dec1) / 1000));
 #endif  // USE_LVGL
 }
+
+#ifdef USE_LVGL
+// MJPEG receive task (core 0): take the newest stashed JPEG, HW-decode it to
+// RGB565 and byte-swap it for LVGL, into the BACK buffer, then publish it to the
+// main loop via rgb_ready_. Runs off the main loop so the decode (~5 ms) and the
+// byte swap (12-41 ms depending on PSRAM speed) no longer block LVGL and the
+// MJPEG transmit path. The shared HW JPEG codec stays serialised with the encoder
+// through jpeg_mutex_, so only one JPEG operation is ever in flight.
+void WebRTCComponent::mjpeg_rx_fn_(void *arg) {
+  auto *self = static_cast<WebRTCComponent *>(arg);
+  while (self->video_rx_run_) {
+    if (self->jpeg_rx_mtx_ == nullptr || !self->jpeg_rx_ready_ ||
+        self->rgb_ready_.load(std::memory_order_acquire)) {
+      // Nothing new, or the main loop has not consumed the last frame yet (do not
+      // overwrite the buffer it is about to show).
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
+    if (self->jdec_ == nullptr && !self->open_jpeg_decoder_()) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+    auto mtx = static_cast<SemaphoreHandle_t>(self->jpeg_rx_mtx_);
+    if (xSemaphoreTake(mtx, pdMS_TO_TICKS(20)) != pdTRUE)
+      continue;
+    int jsize = self->jpeg_rx_size_;
+    self->jpeg_rx_ready_ = false;
+    bool ok = (jsize > 0 && (size_t) jsize <= self->jpeg_dec_in_cap_);
+    if (ok)
+      memcpy(self->jpeg_dec_in_, self->jpeg_rx_buf_, jsize);
+    xSemaphoreGive(mtx);
+    if (!ok) {
+      if (jsize > 0)
+        ESP_LOGW(TAG, "remote JPEG too big for buffer (%d > %u)", jsize,
+                 (unsigned) self->jpeg_dec_in_cap_);
+      continue;
+    }
+
+    jpeg_decode_picture_info_t pi = {};
+    if (jpeg_decoder_get_info(static_cast<uint8_t *>(self->jpeg_dec_in_), jsize, &pi) != ESP_OK)
+      continue;
+    const size_t need = (size_t) pi.width * pi.height * 2;
+    if (need == 0 || need > self->remote_rgb_cap_) {
+      if ((self->video_rx_count_ % 100) == 0)
+        ESP_LOGW(TAG, "remote frame %ux%u exceeds RGB buffer", (unsigned) pi.width,
+                 (unsigned) pi.height);
+      continue;
+    }
+
+    jpeg_decode_cfg_t dc = {};
+    dc.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
+    dc.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
+    dc.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
+    uint32_t outlen = 0;
+    const int64_t t_dec0 = esp_timer_get_time();
+    if (self->jpeg_mutex_ != nullptr)
+      xSemaphoreTake(static_cast<SemaphoreHandle_t>(self->jpeg_mutex_), portMAX_DELAY);
+    esp_err_t de = jpeg_decoder_process(static_cast<jpeg_decoder_handle_t>(self->jdec_), &dc,
+                                        static_cast<uint8_t *>(self->jpeg_dec_in_), jsize,
+                                        static_cast<uint8_t *>(self->remote_rgb_),
+                                        self->remote_rgb_cap_, &outlen);
+    if (self->jpeg_mutex_ != nullptr)
+      xSemaphoreGive(static_cast<SemaphoreHandle_t>(self->jpeg_mutex_));
+    if (de != ESP_OK) {
+      if ((self->video_rx_count_ % 100) == 0)
+        ESP_LOGW(TAG, "jpeg decode failed: %s", esp_err_to_name(de));
+      continue;
+    }
+    // The decoder DMAs into PSRAM; invalidate the CPU cache so the swap below (and
+    // then LVGL) reads fresh pixels.
+    esp_cache_msync(self->remote_rgb_, need,
+                    ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+    const int64_t t_dec1 = esp_timer_get_time();
+    // The HW JPEG decoder emits RGB565 with a byte order LVGL reads swapped
+    // (psychedelic magenta/cyan). Swap 2 pixels per 32-bit word — half the
+    // iterations and PSRAM transactions of a 16-bit loop. Same result as
+    // face2face's proven swap_colors_.
+    {
+      uint32_t *w32 = static_cast<uint32_t *>(self->remote_rgb_);
+      const size_t npx = need / 2;
+      const size_t n32 = npx >> 1;
+      for (size_t i = 0; i < n32; i++) {
+        uint32_t v = w32[i];
+        w32[i] = ((v & 0xFF00FF00u) >> 8) | ((v & 0x00FF00FFu) << 8);
+      }
+      if (npx & 1) {
+        uint16_t *last = static_cast<uint16_t *>(self->remote_rgb_) + npx - 1;
+        *last = (uint16_t) ((*last >> 8) | (*last << 8));
+      }
+    }
+    const int64_t t_swap1 = esp_timer_get_time();
+    // Publish to the main loop (it flips the buffers and repaints the canvas).
+    self->rmt_pub_w_ = (uint16_t) pi.width;
+    self->rmt_pub_h_ = (uint16_t) pi.height;
+    self->rgb_ready_.store(true, std::memory_order_release);
+    if ((self->video_rx_count_++ % 30) == 0)
+      ESP_LOGI(TAG, "video RX: %u frames (%ux%u, %d B JPEG) dec=%ums swap=%ums [off-loop]",
+               (unsigned) self->video_rx_count_, (unsigned) pi.width, (unsigned) pi.height, jsize,
+               (unsigned) ((t_dec1 - t_dec0) / 1000), (unsigned) ((t_swap1 - t_dec1) / 1000));
+  }
+  self->video_rx_task_done_ = true;
+  self->video_rx_task_ = nullptr;
+  vTaskDelete(nullptr);
+}
+#endif  // USE_LVGL
 
 // I420 (contiguous, width*height + 2*(w/2*h/2)) -> RGB565. Ported verbatim from
 // ip_camera_viewer (scalar BT.601, 2x2 block). Runs on the decode task.
@@ -1910,6 +1956,22 @@ void WebRTCComponent::do_start_() {
                             reinterpret_cast<TaskHandle_t *>(&this->video_rx_task_), 1);
     ESP_LOGI(TAG, "H.264 receive ready (edge264 -> canvas %ux%u)", this->video_w_,
              this->video_h_);
+  }
+#endif
+#ifdef USE_LVGL
+  // 4e) MJPEG receive: dedicated task on core 0 (the ESPHome main loop runs on
+  // core 1). Doing the HW decode + the RGB565 byte swap here instead of in loop()
+  // takes 17-46 ms per frame off the main loop, which is what made the video feel
+  // like ~4 fps. 8 KB stack: no big locals, the pixel work is all in PSRAM buffers.
+  if (this->video_codec_ == VIDEO_CODEC_MJPEG && this->remote_canvas_ != nullptr &&
+      this->video_rx_task_ == nullptr) {
+    this->video_rx_run_ = true;
+    this->video_rx_task_done_ = false;
+    this->video_rx_count_ = 0;
+    this->rgb_ready_.store(false, std::memory_order_release);
+    xTaskCreatePinnedToCore(mjpeg_rx_fn_, "webrtc_mrx", 8192, this, 3,
+                            reinterpret_cast<TaskHandle_t *>(&this->video_rx_task_), 0);
+    ESP_LOGI(TAG, "MJPEG receive ready (off-loop decode+swap -> canvas)");
   }
 #endif
 #endif

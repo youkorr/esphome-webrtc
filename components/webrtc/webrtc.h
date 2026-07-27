@@ -155,6 +155,7 @@ class WebRTCComponent : public Component {
   bool open_jpeg_decoder_();             // HW JPEG decoder + DMA buffers (MJPEG recv)
   void render_remote_frame_();           // loop(): decode/swap remote frame -> canvas
   static void video_rx_fn_(void *arg);   // edge264 H.264 decode task
+  static void mjpeg_rx_fn_(void *arg);   // MJPEG HW-decode + byte-swap task
   bool open_h264_decoder_();             // edge264 decoder + queue + RGB/YUV buffers
   void convert_yuv420_to_rgb565_(uint8_t *yuv, uint8_t *rgb565, int w, int h);
   // Remote SDP/ICE from signaling -> feed into esp_peer.
@@ -284,10 +285,17 @@ class WebRTCComponent : public Component {
   void *jpeg_rx_mtx_{nullptr};      // SemaphoreHandle_t
   void *jpeg_dec_in_{nullptr};      // DMA-capable decoder input buffer
   size_t jpeg_dec_in_cap_{0};
-  void *remote_rgb_{nullptr};       // DMA-capable RGB565 decoder output = canvas buffer
+  // MJPEG receive is DOUBLE buffered: the mjpeg_rx task decodes + byte-swaps into
+  // remote_rgb_ (back buffer) while LVGL displays remote_rgb_front_. The two are
+  // swapped by the main loop when the task publishes (rgb_ready_). Both come from
+  // jpeg_alloc_decoder_mem (the HW decoder's output must be its own DMA memory).
+  void *remote_rgb_{nullptr};       // back buffer: decoded + swapped by the task
+  void *remote_rgb_front_{nullptr};  // front buffer: what the canvas shows
   size_t remote_rgb_cap_{0};
   uint16_t rmt_w_{0};               // last decoded remote frame size
   uint16_t rmt_h_{0};
+  uint16_t rmt_pub_w_{0};           // size published by the task with rgb_ready_
+  uint16_t rmt_pub_h_{0};
   uint32_t video_rx_count_{0};
   void *remote_canvas_{nullptr};    // lv_obj_t* (canvas showing the remote peer)
   void *remote_draw_buf_{nullptr};  // heap lv_draw_buf_t (kept void* to avoid LVGL in the header)
