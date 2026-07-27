@@ -38,20 +38,24 @@ class ConnectFailedTrigger : public Trigger<> {
 };
 
 // --- Actions ---
+// NOTE: the base Action::play takes `const Ts &...` in this ESPHome, so the
+// override must match exactly (otherwise it's not an override and the action
+// stays abstract — this bit when the action is used from an LVGL on_click, which
+// instantiates it with <bool, lv_event_t*>).
 template<typename... Ts> class StartAction : public Action<Ts...>, public Parented<WebRTCComponent> {
  public:
-  void play(Ts... x) override { this->parent_->start(); }
+  void play(const Ts &...x) override { this->parent_->start(); }
 };
 
 template<typename... Ts> class StopAction : public Action<Ts...>, public Parented<WebRTCComponent> {
  public:
-  void play(Ts... x) override { this->parent_->stop(); }
+  void play(const Ts &...x) override { this->parent_->stop(); }
 };
 
 template<typename... Ts> class SendDataAction : public Action<Ts...>, public Parented<WebRTCComponent> {
  public:
   TEMPLATABLE_VALUE(std::string, data)
-  void play(Ts... x) override { this->parent_->send_data(this->data_.value(x...)); }
+  void play(const Ts &...x) override { this->parent_->send_data(this->data_.value(x...)); }
 };
 
 }  // namespace webrtc

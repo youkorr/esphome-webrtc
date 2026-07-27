@@ -1,0 +1,728 @@
+substitutions:
+  name: "webrtc-test-tab5"
+  friendly_name: webrtc_test
+  # !!! LE MÊME NOM DE SALLE SUR LES DEUX P4 !!!  (ce n'est PAS une adresse IP)
+  # Les deux appareils rejoignent cette salle sur webrtc.espressif.com et sont
+  # mis en relation. Mets exactement la même valeur ici sur le 2e P4.
+  room: "tab5duo"
+  
+  # Palette UI
+  col_bg: "0x0B0F14"
+  col_panel: "0x161B22"
+  col_text: "0xE6EDF3"
+  col_text2: "0x8B949E"
+  col_green: "0x2EA043"
+  col_red: "0xE5484D"
+  col_amber: "0xF0883E"
+
+
+  arrow_up_bold_box:     "\U000F0738"
+  shield_home_icon:      "\U000F068A" # home  
+
+  allowed_characters: " []¿?¡!#%'()+,-—_./:µ³°ªº0123456789ABCDEFGHIJKLMNÑOPQRSTUVWXYZabcdefghijklmnñopqrstuvwxyzáéíóúÁÉÍÓÚäëïöüàâçèêîôùûÀÂÇÈÊÎÔÙÛ"
+  font_glyphsets: "GF_Latin_Core"
+  font_family: Figtree 
+  
+
+
+esphome:
+  name: $name
+  friendly_name: $friendly_name
+
+esp32:
+  board: esp32-p4-evboard
+  cpu_frequency: 360MHz
+  flash_size: 16MB
+  engineering_sample: true
+  framework:
+    type: esp-idf
+
+
+    advanced:
+      enable_idf_experimental_features: yes
+    sdkconfig_options:
+      CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM: "y"
+      CONFIG_ESP_TASK_WDT_EN: "10"
+      
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "n"
+      CONFIG_SPIRAM_RODATA: "n"
+      CONFIG_ESP32_SPIRAM_SUPPORT: "y"
+      CONFIG_SPIRAM_USE_MALLOC: "y"
+      CONFIG_FATFS_LFN_STACK: "y"
+      #CONFIG_LWIP_SO_RCVBUF: "y"
+      CONFIG_LWIP_MAX_SOCKETS: "16"
+      CONFIG_VFS_SUPPORT_IO: "y"
+      CONFIG_VFS_MAX_COUNT: "16" 
+      CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"
+      CONFIG_ESP_TIMER_TASK_STACK_SIZE: "4096"
+      #CONFIG_ESP_TASK_WDT_TIMEOUT_S: "60"
+      CONFIG_ESP_TASK_LOOP_STACK_SIZE: "16384"
+      CONFIG_FATFS_LFN_HEAP: "y"
+      DCONFIG_USE_AUDIO_AAC_SUPPORT: "y"
+      DCONFIG_ESP_JPG_DECODE_ENABLE: "y"
+      DCONFIG_ESPHOME_ENABLE_PNGLE: "1"
+      CONFIG_SPIRAM_SPEED_200M: "y"  # ← NOUVEAU: 200 MHz au lieu de défaut
+      CONFIG_SPIRAM_SPEED: "200"
+      # Buffers WiFi distant (C6) + agrégation AMPDU = gros gain d'efficacité
+      CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM: "16"
+      CONFIG_WIFI_RMT_DYNAMIC_RX_BUFFER_NUM: "64"
+      CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM: "64"
+      CONFIG_WIFI_RMT_AMPDU_TX_ENABLED: "y"
+      CONFIG_WIFI_RMT_TX_BA_WIN: "32"
+      CONFIG_WIFI_RMT_AMPDU_RX_ENABLED: "y"
+      CONFIG_WIFI_RMT_RX_BA_WIN: "32"
+      # Buffers lwIP (UDP surtout pour toi)
+      CONFIG_LWIP_UDP_RECVMBOX_SIZE: "64"
+      CONFIG_LWIP_TCPIP_RECVMBOX_SIZE: "64"
+      CONFIG_LWIP_TCP_RECVMBOX_SIZE: "64"
+      CONFIG_LWIP_TCP_SND_BUF_DEFAULT: "65534"
+      CONFIG_LWIP_TCP_WND_DEFAULT: "65534"
+      CONFIG_LWIP_TCP_SACK_OUT: "y"  
+
+      # 2) Cache L2 au maximum — couvre bien mieux les buffers de frame en PSRAM
+
+      #CONFIG_CACHE_L2_CACHE_LINE_128B: "y"
+      #CONFIG_CACHE_L2_CACHE_256KB: "y"
+
+
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "1p7/Z8ymUYlGdvuu8re9QwGQIS+HTGq8h/xd6+Bylq4="
+  # Sans Home Assistant connecté, l'API redémarre l'ESP au bout de 15 min
+  # ("No clients; rebooting"). 0s = ne jamais rebooter pour ça (test autonome).
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    password: "ca945f6a489a39019cbc3297747aea82"
+
+http_request:
+
+esp32_hosted:
+  variant: esp32c6
+  active_high: true
+  clk_pin: GPIO12
+  cmd_pin: GPIO13
+  d0_pin: GPIO11
+  d1_pin: GPIO10
+  d2_pin: GPIO9
+  d3_pin: GPIO8
+  reset_pin: GPIO15
+  use_psram: true
+  slot: 1
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Ppa-Rotation-Test"
+    password: "TnHfzFkg4NEC"
+
+captive_portal:
+    
+update:
+  - platform: esp32_hosted
+    id: c6_firmware_update
+    name: "ESP32-C6 Firmware"
+    type: http
+    source: https://esphome.github.io/esp-hosted-firmware/manifest/esp32c6.json
+    update_interval: 6h
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  # PERFORMANCE : le logger écrit de façon BLOQUANTE sur la boucle principale —
+  # celle qui encode/décode la vidéo. En DEBUG (le défaut) le flot esp-idf
+  # (SCTP: CRC error, AGENT: ...) sortait à chaque frame et on voyait
+  # "logger took a long time for an operation (122 ms)" : plus qu'une période de
+  # frame entière à 10 fps -> vidéo saccadée. INFO + esp-idf muet = boucle libre.
+  # Repasse en DEBUG seulement pour diagnostiquer (et attends-toi aux saccades).
+  level: INFO
+  logs:
+    esp-idf: WARN          # coupe le flot SCTP/AGENT/ICE (très verbeux)
+    component: ERROR       # coupe les "took a long time" (informatif, pas utile ici)
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/youkorr/lvgl_9.5
+      ref: claude/jolly-lamport-ERZOC
+    components: [lvgl, image, font]
+    refresh: 0s
+  - source:
+      type: git
+      url: https://github.com/youkorr/esphome-webrtc
+      ref: claude/esphome-webrtc-face-toface-9b95pu
+    components: [webrtc]
+    refresh: 0s
+  - source:
+      type: git
+      url: https://github.com/youkorr/face-toface
+      ref: claude/mit-license-face-to-face-p9fc6m
+    components: [fdaudio]
+    refresh: 0s
+  - source:
+      type: git
+      url: https://github.com/youkorr/esphome_esp-video
+      ref: claude/usb-uvc-consumer-integration-gnbflf
+    components: [esp_video, esp_cam_sensor]
+    refresh: 0s
+  # edge264 (décodage H.264 logiciel) — nécessaire SEULEMENT pour afficher la
+  # vidéo H.264 d'un navigateur/IP-cam sur l'écran. Laisse la ligne `h264_hp:`
+  # décommentée plus bas pour l'activer. (Pour P4<->P4 en MJPEG, pas besoin.)
+  - source:
+      type: git
+      url: https://github.com/youkorr/ip-camera-viewer
+      ref: 44815290647b9fd1c760dd82737eac209ba98714
+    components: [h264_hp]
+    refresh: 0s 
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║ CHOIX DU CODEC VIDÉO — 2 réglages COUPLÉS, à changer ENSEMBLE :            ║
+# ║                                                                           ║
+# ║   • MJPEG :  video_codec: mjpeg   ET   la ligne « h264_hp: » COMMENTÉE     ║
+# ║   • H.264 :  video_codec: h264    ET   la ligne « h264_hp: » DÉCOMMENTÉE   ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+# Ce n'est PAS un bug, c'est une contrainte matérielle : h264_hp active
+# CONFIG_SPIRAM_USE_MALLOC (edge264 doit atteindre la PSRAM par malloc), ce qui
+# met la PSRAM en mémoire "DEFAULT". Le driver JPEG matériel (utilisé SEULEMENT
+# en MJPEG) y alloue alors ses descripteurs DMA -> corrompus par le DMA caméra
+# -> crash "Instruction access fault" au 1er frame. En H.264 le codec JPEG
+# matériel n'est PAS utilisé (encodeur H.264 matériel + décodeur edge264
+# logiciel), donc SPIRAM_USE_MALLOC est sans danger. Garde les 2 cohérents.
+# h264_hp:
+
+## ===========================================================================
+##  WEBRTC — P4 <-> P4 (MJPEG vidéo matérielle + Opus audio, 1280x720)
+##  Mets le MÊME room_id sur les deux P4 (voir substitutions.room en haut).
+## ===========================================================================
+webrtc:
+  id: rtc
+  room_id: "${room}"
+  # role: PLUS BESOIN. Le rôle est automatique (défaut role: auto) : le serveur
+  # de signaling élit offerer/answerer tout seul (le 1er à rejoindre = offerer).
+  # Le MÊME firmware va sur les deux P4, aucun rôle à configurer, impossible de
+  # se tromper. (Option avancée seulement : role: caller/callee pour forcer.)
+  # Signaling auto-hébergé (voir signaling-server/). Décommente pour ne plus
+  # dépendre de webrtc.espressif.com. MÊME url + token sur les deux P4.
+  # signaling_url: "http://192.168.1.12:8080"
+  # signaling_token: "change-moi-secret-partage"
+  video_codec: mjpeg          # MJPEG : capture -> PPA (taille exacte) -> JPEG matériel
+                              # -> data channel, sur la boucle principale.
+                              # Alternative validée : h264 (encodeur HW + edge264).
+  audio_codec: opus           # 16 kHz large bande (P4<->P4)
+  video_direction: sendrecv   # envoie ET reçoit la vidéo
+  audio_direction: sendrecv   # envoie ET reçoit l'audio
+  enable_data_channel: true   # ESSENTIEL : la vidéo MJPEG transite par le data channel
+  camera_id: tab5_cam
+  speaker_id: tab5_speaker
+  microphone_id: tab5_microphone
+  sample_rate: 16000
+  video_width: 640            # taille EXACTE envoyée (le PPA redimensionne la caméra
+  video_height: 480           # vers ça, quelle que soit sa résolution native ; mult. de 16)
+  fps: 10                     # 640x480 : garde 10 fps pour ne pas saturer le data channel
+  jpeg_quality: 25            # qualité MJPEG : + bas = frames + petites. À 640x480 il faut
+                              # viser ~11 Ko/frame (le plafond du lien ESP-Hosted C6 avec
+                              # l'audio) : 25 ≈ 10-12 Ko. Si les logs affichent « > 13000 B
+                              # cap; dropped » (pas d'image), baisse encore (20, 18...).
+                              # Plus simple/net : baisse plutôt la résolution (480x352,
+                              # 400x400) et remonte la qualité — voir note plus bas.
+  auto_start: false
+  ice_servers:
+    - url: "stun:stun.l.google.com:19302"
+    # TON coturn (Unraid, br0, IP LAN 192.168.1.12). Voir coturn/turnserver.conf.
+    # LAN pour ce test. Pour le maison-à-maison, remplace 192.168.1.12 par ton
+    # IP PUBLIQUE (86.206.231.111) une fois la Livebox configurée (redirections).
+    - url: "turn:192.168.1.12:3478"
+      username: "esp32"
+      password: "esp32pass"
+  on_paired:
+    - lvgl.label.update:
+        id: call_status
+        text: "● Appairé…"
+        text_color: ${col_amber}
+  on_connected:
+    - lvgl.label.update:
+        id: call_status
+        text: "● Connecté"
+        text_color: ${col_green}
+    - lvgl.widget.hide: remote_hint
+  on_disconnected:
+    - lvgl.label.update:
+        id: call_status
+        text: "● Terminé"
+        text_color: ${col_text2}
+    - lvgl.widget.show: remote_hint
+  on_connect_failed:
+    - lvgl.label.update:
+        id: call_status
+        text: "● Échec connexion"
+        text_color: ${col_red}
+    - lvgl.widget.show: remote_hint  
+# --- Bring-up écran Tab5 ---
+i2c:
+  - id: bsp_bus
+    sda: GPIO31
+    scl: GPIO32
+    frequency: 400kHz
+
+esp_ldo:
+  - voltage: 2.5V
+    channel: 3   
+# Boutons Home Assistant (doublon pratique des boutons à l'écran)
+button:
+  - platform: template
+    name: "Appeler"
+    on_press:
+      - webrtc.start: rtc
+  - platform: template
+    name: "Raccrocher"
+    on_press:
+      - webrtc.stop: rtc
+# ============================================================================
+# AUDIO FULL-DUPLEX — notre composant fdaudio (Espressif natif)
+# ============================================================================
+fdaudio:
+  id: audio_engine
+  lrclk_pin: GPIO29
+  bclk_pin: GPIO27
+  mclk_pin: GPIO30
+  din_pin: GPIO28
+  dout_pin: GPIO26
+  i2c_port: 0
+  output_codec: es8388
+  output_address: 0x10
+  mic_address: 0x40
+  mic_gain_db: 37.5
+  output_volume: 70
+  sample_rate: 16000
+  enable_aec: true            # AEC -> micro nettoyé (rend le barge-in fiable)
+
+microphone:
+  - platform: fdaudio
+    id: tab5_microphone
+    fdaudio_id: audio_engine
+
+speaker:
+  - platform: fdaudio
+    id: tab5_speaker
+    fdaudio_id: audio_engine
+
+audio_dac:
+  - platform: es8388
+    id: es8388_dac
+
+media_player:
+  - platform: speaker
+    name: "Habbit Desk PRO"
+    id: speaker_player
+    announcement_pipeline:
+      speaker: tab5_speaker
+      format: FLAC
+      sample_rate: 48000
+      num_channels: 1    
+# ============================================================================
+# ESP-Video Core (M5Stack Tab5 style)
+# ============================================================================  
+esp_video:
+  i2c_id: bsp_bus
+  xclk_pin: GPIO36
+  xclk_freq: 24000000
+  enable_jpeg: true
+  enable_isp: true
+  use_heap_allocator: false
+
+# ============================================================================
+# Caméra MIPI-CSI 
+# ============================================================================
+
+
+
+esp_cam_sensor:
+  id: tab5_cam
+  i2c_id: bsp_bus
+  sensor_type: sc2356        #"sensor_type" au lieu de "sensor"
+  # METS LA MÊME TAILLE QUE video_width x video_height du bloc webrtc !
+  # Si la caméra sort déjà la taille envoyée, le composant encode DIRECTEMENT le
+  # buffer de la caméra (log: "[zero-copy]") : plus aucun redimensionnement.
+  # Mesuré à 1280x720 -> 640x480 : le scale CPU coûtait 26 ms sur la boucle
+  # principale À CHAQUE frame (le poste le plus lourd, limité par la bande passante
+  # PSRAM) -> vidéo saccadée. En zero-copy ce coût tombe à ~0.
+  resolution: "640x480"            # = video_width x video_height -> zero-copy
+  pixel_format: "RGB565"      # Zero-copy
+  # framerate: la caméra écrit CHAQUE frame en PSRAM même si on n'en envoie que
+  # fps/s. À 30 fps en 1280x720 c'était ~55 Mo/s de PSRAM gaspillés (partagés avec
+  # l'écran MIPI et les DMA JPEG). Colle-le au fps du bloc webrtc.
+  framerate: 15
+  jpeg_quality: 15
+  mirror_x: false    # Flip horizontal (hardware) - laisse false (voir ppa_enabled)
+  mirror_y: false    # Flip vertical - laisse false (voir ppa_enabled)
+  rotation: 0         # 0/90/180/270° - laisse 0 (voir ppa_enabled)
+  crop_offset_x: 0   # Crop pixels from left - laisse 0 (voir ppa_enabled)
+  # OBLIGATOIRE en visio MJPEG sendrecv: la caméra NE DOIT PAS utiliser le PPA.
+  # Sur le P4 le PPA et le codec JPEG matériel partagent le moteur DMA; si la
+  # caméra fait un PPA à chaque capture ALORS que le webrtc encode (TX) ET decode
+  # (RX) sur le codec JPEG, le relais encodeur<->decodeur fige la boucle
+  # principale (task_wdt, 1 encode + 1 decode puis mort). ppa_enabled: false ->
+  # une seule famille de clients sur le codec. ATTENTION: mirror/rotation/crop
+  # ci-dessus RÉACTIVENT le PPA même avec false -> garde-les à 0/false.
+  ppa_enabled: false
+
+      
+# UN SEUL canvas par P4 (le correspondant). On N'AFFICHE PAS l'auto-aperçu local
+# (lvgl_camera_display retiré) : deux pipelines vidéo sur un P4 = trop lourd. La
+# caméra tourne quand même pour l'ENVOI (le composant webrtc la démarre lui-même).
+color:
+
+  - id: color_sky_blue
+    hex: 3FA7F3
+  - id: color_slate_blue_gray
+    hex: 343645
+  - id: color_steel_blue
+    hex: 606682
+  - id: color_misty_blue
+    hex: 9BA2BC
+  - id: color_black
+    hex: 0d0d0d
+  - id: color_dark_gray
+    hex: 333333
+  - id: color_gray
+    hex: 666666
+  - id: color_light_gray
+    hex: 999999
+  - id: color_white
+    hex: f2f0eb
+
+font:
+
+  - file: {type: gfonts, family: "${font_family}", weight: 300}
+    id: f_18
+    size: 18
+    glyphsets: ["${font_glyphsets}"]
+  - file: {type: gfonts, family: "${font_family}", weight: 600}
+    id: f_24
+    size: 24
+    glyphsets: ["${font_glyphsets}"]
+  - file: {type: gfonts, family: "${font_family}", weight: 700}
+    id: f_30
+    size: 30
+    glyphsets: ["${font_glyphsets}"]  
+  
+switch:
+  - platform: gpio
+    id: wifi_power
+    name: "WiFi Power"
+    pin:
+      pi4ioe5v6408: pi4ioe2
+      number: 0
+    restore_mode: ALWAYS_ON
+
+  - platform: gpio
+    id: usb_5v_power
+    name: "USB Power"
+    pin:
+      pi4ioe5v6408: pi4ioe2
+      number: 3
+
+  - platform: gpio
+    id: quick_charge
+    name: "Quick Charge"
+    pin:
+      pi4ioe5v6408: pi4ioe2
+      number: 5
+      inverted: true
+
+  - platform: gpio
+    id: charge_enable
+    name: "Charge Enable"
+    pin:
+      pi4ioe5v6408: pi4ioe2
+      number: 7
+
+  - platform: gpio
+    id: wifi_antenna_int_ext
+    pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 0
+
+  - platform: gpio
+    id: speaker_enable
+    name: "Speaker Enable"
+    pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 1
+    restore_mode: ALWAYS_ON
+    inverted: False
+
+
+
+  - platform: gpio
+    id: external_5v_power
+    name: "External 5V Power"
+    pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 2
+ 
+  #- platform: gpio
+    #id: interrupt_pin_toushsreen
+    #name: "interrupt_pin_toushscreen"
+    #pin:
+      #inverted: true
+      #number: GPIO23
+    #restore_mode: ALWAYS_ON  
+
+
+  - platform: gpio
+    id: cam_rst
+    name: "Camera Reset"
+    pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 6
+    restore_mode: ALWAYS_ON
+    on_turn_on:
+      - delay: 100ms
+      - logger.log: "Camera reset activated"  
+  #- platform: ip_camera_viewer
+    #id: cam
+    #camera_id: security_cam_1
+    #restore_mode: ALWAYS_OFF      # PAS ALWAYS_ON  
+
+pi4ioe5v6408:
+  - id: pi4ioe1
+    address: 0x43
+    # 0: O - wifi_antenna_int_ext
+    # 1: O - speaker_enable
+    # 2: O - external_5v_power
+    # 3: NC
+    # 4: O - lcd reset
+    # 5: O - touch panel reset
+    # 6: O - camera reset
+    # 7: I - headphone detect
+  - id: pi4ioe2
+    address: 0x44
+    # 0: O - wifi_power
+    # 1: NC
+    # 2: NC
+    # 3: O - usb_5v_power
+    # 4: O - poweroff pulse
+    # 5: O - quick charge enable (inverted)
+    # 6: I - charging status
+    # 7: O - charge enable
+
+psram:
+  mode: hex
+  speed: 200MHz
+
+output:
+  - platform: ledc
+    pin: GPIO22
+    id: backlight_pwm
+    frequency: 1000Hz
+
+light:
+  - platform: monochromatic
+    output: backlight_pwm
+    id: backlight
+    name: "Backlight"
+    restore_mode: RESTORE_DEFAULT_ON
+
+#touchscreen:
+  #- platform: gt911
+    #reset_pin:
+      #pi4ioe5v6408: pi4ioe1
+      #number: 5
+    #calibration:
+      #x_min: 0
+      #y_max: 720
+      #y_min: 0
+      #x_max: 1280
+    #id: touch_screen
+    #on_touch:
+touchscreen:
+  - platform: gt911
+    id: touch_screen
+    interrupt_pin: GPIO23
+    update_interval: never
+    reset_pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 5
+    calibration:
+      x_min: 0
+      x_max: 720
+      y_min: 0
+      y_max: 1280
+    on_touch:      
+      - lambda: |-
+          ESP_LOGD("touchscreen", "Touch detected at (%d, %d)", touch.x, touch.y);      
+
+      - light.turn_on: backlight          
+    transform:
+      swap_xy: false
+      mirror_x: false
+      mirror_y: false
+
+
+display:
+  - platform: mipi_dsi
+    dimensions:
+      height: 1280
+      width: 720
+    model: M5Stack-Tab5
+    reset_pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 4
+    pixel_mode: 24      
+    #color_order: rgb
+    #rotation: 0          # ← PAS de rotation driver : on teste LVGL/PPA
+
+# --- Image asymétrique (flèche) pour VOIR le sens de rotation ---
+image:
+  - file: "images/slider_indicator.png"
+    id: arrow
+    resize: 220x220
+    type: RGB565
+
+  - file: https://raw.githubusercontent.com/youkorr/lvgl_9.5/claude/jolly-lamport-ERZOC/tests/assets/ppa_rot_test.png
+    id: arrow2
+    resize: 240x240
+    type: RGB565
+  - file: "images/animated.webp"
+    id: animatedweb
+    type: RGB565
+    resize: 1024x600
+
+
+  - file: https://raw.githubusercontent.com/youkorr/lvgl_9.5/claude/jolly-lamport-ERZOC/tests/assets/ppa_rot_test_240x120.png
+    id: arrow3
+    type: RGB565
+    
+globals:
+  - id: step
+    type: int
+    initial_value: '0'    
+
+# --- LVGL avec rotation PPA ---
+lvgl:
+  #full_refresh: true
+  use_ppa: true
+  use_ppa_img: true
+  color_depth: 16
+  #buffer_size: 100%
+  byte_order: little_endian
+  fps_benchmark: true
+  perf_monitor: true
+  rotation: 270     # ← LA rotation à tester (PPA HW)
+  pages:
+    - id: call_page
+      bg_color: ${col_bg}
+      on_load:
+        - lambda: |-
+            // Un seul canvas : celui du correspondant.
+            id(rtc).set_remote_canvas(id(remote_canvas));
+      widgets:
+        # ---------- Vidéo du correspondant ----------
+        # Le canvas fait la TAILLE DE LA VIDÉO (640x480) et est centré. IMPORTANT :
+        # width/height doivent = video_width/video_height du bloc webrtc, sinon
+        # l'image est rognée ou décalée (le décodeur pose un buffer à la taille
+        # décodée, il n'y a pas de mise à l'échelle).
+        - canvas:
+            id: remote_canvas
+            align: CENTER
+            width: 640
+            height: 480
+            bg_color: 0x000000
+            bg_opa: COVER
+            border_width: 2
+            border_color: ${col_panel}
+            radius: 8
+            pad_all: 0
+        # Message d'attente (par-dessus le canvas, masqué à la connexion)
+        - label:
+            id: remote_hint
+            align: CENTER
+            text: "En attente du correspondant…"
+            text_color: ${col_text2}
+            text_font: f_24
+
+        # ---------- Barre de statut (superposée, haut) ----------
+        - obj:
+            align: TOP_MID
+            x: 0
+            y: 0
+            width: 1280
+            height: 56
+            bg_color: ${col_panel}
+            bg_opa: 70%
+            border_width: 0
+            radius: 0
+            pad_all: 0
+            widgets:
+              - label:
+                  align: LEFT_MID
+                  x: 16
+                  text: "Visio ESP32-P4  ·  Salle ${room}"
+                  text_color: ${col_text}
+                  text_font: f_24
+              - label:
+                  id: call_status
+                  align: RIGHT_MID
+                  x: -16
+                  text: "● En attente"
+                  text_color: ${col_text2}
+                  text_font: f_18
+
+        # ---------- Boutons superposés (bas) ----------
+        - button:
+            id: btn_call
+            align: BOTTOM_MID
+            x: -140
+            y: -24
+            width: 250
+            height: 84
+            bg_color: ${col_green}
+            bg_opa: COVER
+            radius: 14
+            on_click:
+              - webrtc.start: rtc
+              - lvgl.label.update:
+                  id: call_status
+                  text: "● Appel en cours…"
+                  text_color: ${col_amber}
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "Appeler"
+                  text_color: 0xFFFFFF
+                  text_font: f_30
+        - button:
+            id: btn_hangup
+            align: BOTTOM_MID
+            x: 140
+            y: -24
+            width: 250
+            height: 84
+            bg_color: ${col_red}
+            bg_opa: COVER
+            radius: 14
+            on_click:
+              - webrtc.stop: rtc
+              - lvgl.label.update:
+                  id: call_status
+                  text: "● En attente"
+                  text_color: ${col_text2}
+              - lvgl.widget.show: remote_hint
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "Raccrocher"
+                  text_color: 0xFFFFFF
+                  text_font: f_30
+
+
+            
+
+
+            

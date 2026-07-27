@@ -1,0 +1,1003 @@
+substitutions:
+  name: "ppa-rotation-test-tab5"
+  friendly_name: ppa_rotation_test
+
+
+  arrow_up_bold_box:     "\U000F0738"
+  shield_home_icon:      "\U000F068A" # home  
+
+  allowed_characters: " []¿?¡!#%'()+,-—_./:µ³°ªº0123456789ABCDEFGHIJKLMNÑOPQRSTUVWXYZabcdefghijklmnñopqrstuvwxyzáéíóúÁÉÍÓÚäëïöüàâçèêîôùûÀÂÇÈÊÎÔÙÛ"
+  font_glyphsets: "GF_Latin_Core"
+  font_family: Figtree 
+  
+
+
+esphome:
+  name: $name
+  friendly_name: $friendly_name
+
+esp32:
+  board: esp32-p4-evboard
+  cpu_frequency: 360MHz
+  flash_size: 16MB
+  engineering_sample: true
+  framework:
+    type: esp-idf
+
+
+    advanced:
+      enable_idf_experimental_features: yes
+    sdkconfig_options:
+      CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM: "y"
+      CONFIG_ESP_TASK_WDT_EN: "10"
+      
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "n"
+      CONFIG_SPIRAM_RODATA: "n"
+      CONFIG_ESP32_SPIRAM_SUPPORT: "y"
+      CONFIG_SPIRAM_USE_MALLOC: "y"
+      CONFIG_FATFS_LFN_STACK: "y"
+      #CONFIG_LWIP_SO_RCVBUF: "y"
+      CONFIG_LWIP_MAX_SOCKETS: "16"
+      CONFIG_VFS_SUPPORT_IO: "y"
+      CONFIG_VFS_MAX_COUNT: "16" 
+      CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"
+      CONFIG_ESP_TIMER_TASK_STACK_SIZE: "4096"
+      #CONFIG_ESP_TASK_WDT_TIMEOUT_S: "60"
+      CONFIG_ESP_TASK_LOOP_STACK_SIZE: "16384"
+      CONFIG_FATFS_LFN_HEAP: "y"
+      DCONFIG_USE_AUDIO_AAC_SUPPORT: "y"
+      DCONFIG_ESP_JPG_DECODE_ENABLE: "y"
+      DCONFIG_ESPHOME_ENABLE_PNGLE: "1"
+      CONFIG_SPIRAM_SPEED_200M: "y"  # ← NOUVEAU: 200 MHz au lieu de défaut
+      CONFIG_SPIRAM_SPEED: "200"
+      # Buffers WiFi distant (C6) + agrégation AMPDU = gros gain d'efficacité
+      CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM: "16"
+      CONFIG_WIFI_RMT_DYNAMIC_RX_BUFFER_NUM: "64"
+      CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM: "64"
+      CONFIG_WIFI_RMT_AMPDU_TX_ENABLED: "y"
+      CONFIG_WIFI_RMT_TX_BA_WIN: "32"
+      CONFIG_WIFI_RMT_AMPDU_RX_ENABLED: "y"
+      CONFIG_WIFI_RMT_RX_BA_WIN: "32"
+      # Buffers lwIP (UDP surtout pour toi)
+      CONFIG_LWIP_UDP_RECVMBOX_SIZE: "64"
+      CONFIG_LWIP_TCPIP_RECVMBOX_SIZE: "64"
+      CONFIG_LWIP_TCP_RECVMBOX_SIZE: "64"
+      CONFIG_LWIP_TCP_SND_BUF_DEFAULT: "65534"
+      CONFIG_LWIP_TCP_WND_DEFAULT: "65534"
+      CONFIG_LWIP_TCP_SACK_OUT: "y"  
+
+      # 2) Cache L2 au maximum — couvre bien mieux les buffers de frame en PSRAM
+
+      #CONFIG_CACHE_L2_CACHE_LINE_128B: "y"
+      #CONFIG_CACHE_L2_CACHE_256KB: "y"
+
+
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "1p7/Z8ymUYlGdvuu8re9QwGQIS+HTGq8h/xd6+Bylq4="
+
+ota:
+  - platform: esphome
+    password: "ca945f6a489a39019cbc3297747aea82"
+
+http_request:
+
+esp32_hosted:
+  variant: esp32c6
+  active_high: true
+  clk_pin: GPIO12
+  cmd_pin: GPIO13
+  d0_pin: GPIO11
+  d1_pin: GPIO10
+  d2_pin: GPIO9
+  d3_pin: GPIO8
+  reset_pin: GPIO15
+  use_psram: true
+  slot: 1
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Ppa-Rotation-Test"
+    password: "TnHfzFkg4NEC"
+
+captive_portal:
+    
+update:
+  - platform: esp32_hosted
+    id: c6_firmware_update
+    name: "ESP32-C6 Firmware"
+    type: http
+    source: https://esphome.github.io/esp-hosted-firmware/manifest/esp32c6.json
+    update_interval: 6h
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/youkorr/lvgl_9.5
+      ref: claude/jolly-lamport-ERZOC
+    components: [lvgl, image, font]
+    refresh: always
+  - source:
+      type: git
+      url: https://github.com/youkorr/esphome_esp-video
+      ref: claude/usb-uvc-consumer-integration-gnbflf
+    components: [esp_video, esp_cam_sensor, lvgl_camera_display]
+    refresh: 0s 
+  - source:
+      type: git
+      url: https://github.com/youkorr/ip-camera-viewer
+      ref: b82534024d1c9d5b1c661fcc3560aa2761a1462d
+    components: [ip_camera_viewer, h264_hp, esp_h264]
+    refresh: 0s    
+# --- Bring-up écran Tab5 ---
+i2c:
+  - id: bsp_bus
+    sda: GPIO31
+    scl: GPIO32
+    frequency: 400kHz
+
+esp_ldo:
+  - voltage: 2.5V
+    channel: 3   
+
+
+ip_camera_viewer:
+  - id: security_cam_1
+    canvas_id: cam_canvas
+    width: 640
+    height: 352
+    update_interval: 66ms
+
+    # ── Option A : flux H.264 (Baseline OU Main/High → edge264) ──
+    protocol: rtsp            # ou "h264" (alias)
+    url: "rtsp://Tapoone:Tapoone132@192.168.1.13:554/stream2" #http://192.168.1.38:1984/api/stream.mjpeg?src=frigate1_esp32 #"rtsp://192.168.1.38:8554/frigate1_esp32_h264" #"rtsp://Tapoone:Tapoone132@192.168.1.13:554/stream2"
+
+    # ── Option B : flux MJPEG (via go2rtc/Frigate) ──
+    #protocol: mjpeg
+    #url: "http://192.168.1.38:1984/api/stream.mjpeg?src=frigate1_esp32"
+    display_width: 800    # agrandi par le PPA, quasi gratuit
+    display_height: 600 
+    keep_alive: false
+# ============================================================================
+# ESP-Video Core (M5Stack Tab5 style)
+# ============================================================================  
+esp_video:
+  i2c_id: bsp_bus
+  xclk_pin: GPIO36
+  xclk_freq: 24000000
+  enable_jpeg: true
+  enable_isp: true
+  use_heap_allocator: false
+
+# ============================================================================
+# Caméra MIPI-CSI 
+# ============================================================================
+
+
+
+esp_cam_sensor:
+  id: tab5_cam
+  i2c_id: bsp_bus
+  sensor_type: sc2356        #"sensor_type" au lieu de "sensor"
+  resolution: "1280x720"           # , 1024x600 ,"800x600" 
+  pixel_format: "RGB565"      # Zero-copy 
+  framerate: 30
+  jpeg_quality: 15
+  mirror_x: false    # Flip horizontal (hardware)
+  mirror_y: false    # Flip vertical
+  rotation: 0         # 0/90/180/270°
+  crop_offset_x: 0   # Crop pixels from left
+  ppa_enabled: false    # PPA
+
+      
+# ============================================================================
+# Display LVGL avec caméra
+# ============================================================================  
+lvgl_camera_display:
+  id: camera_display
+  camera_id: tab5_cam
+  canvas_id: camera_canvas
+  update_interval: 33ms    # LDO du PHY MIPI-DSI (P4)
+color:
+
+  - id: color_sky_blue
+    hex: 3FA7F3
+  - id: color_slate_blue_gray
+    hex: 343645
+  - id: color_steel_blue
+    hex: 606682
+  - id: color_misty_blue
+    hex: 9BA2BC
+  - id: color_black
+    hex: 0d0d0d
+  - id: color_dark_gray
+    hex: 333333
+  - id: color_gray
+    hex: 666666
+  - id: color_light_gray
+    hex: 999999
+  - id: color_white
+    hex: f2f0eb
+
+font:
+  - file: "https://github.com/BigBobbas/ESP32-S3-Box3-Custom-ESPHome/raw/main/fonts/materialdesignicons-webfont.ttf"
+    id: mdi60
+    size: 60
+    bpp: 4
+    glyphs: [
+      "\U000F0BC4",#alarm away
+      "\U000F07D0", # home assistant
+      "\U000F0384",#music
+      "\U000F07C5",#sound
+      "\U000F1322",#tools
+      "\U000F07AE",#cctv
+      "\U000F0493",#settings cog
+      "\U000F05CB",#voice
+      "\U000F0502",#screen settings
+      "\U000F1C6F",#info
+      "\U000F0521",#scr 
+      "\U000F04B2",#sleep
+      "\U000F1110",#s_saver
+      "\U000F0D90",#screen off
+      "\U000F009E",#bell
+      "\U000F04DB",#stop
+      "\U000F18DD",#light_mut
+      "\U000F062C",#source
+      "\U000F10FE",#kubernetes
+      "\U000F02A4",#github
+      "\U000F06B2",#angular
+      "\U000F0439",#radio
+      "\U000F0BB1",#next
+      "\U000F036B",#videocall
+      "\U000F1A13",#heure
+      "\U000F0F30",#meteo
+      "\U000F1923",#timer
+      "\U000F056E",#dashboard
+      "\U000F07DC",#micro-sd
+      "\U000F0CB8",#music_play
+      "\U000F08D6",#settings
+      "\U000F0565",#arming
+      "\U000F050F",#temp sensor
+      "\U000F0150",#clock
+      "\U000F081A",#door
+      "\U000F06D9",#garage
+      "\U000F1A8B",#shutter
+      "\U000F02E9",#Gallery
+      "\U000F0C7B",#recognition
+      "\U000F057C",#vlc
+      "\U000F05C3",#youtube
+      "\U000F18DE",#light
+      "\U000F0675",#application
+      "\U000F00DF",
+      "\U000F0919", # call video
+
+      ]   
+  # Interface
+  # Interfaz
+
+  - file: "gfonts://Figtree"
+    id: font_clock
+    size: 160
+    glyphs: ${allowed_characters}
+  - file: "gfonts://Material+Symbols+Outlined"
+    id: font_info_icons
+    size: 40
+    glyphs: [
+      "\U0000f24f", # 100%
+      "\U0000f255", # 50%
+      "\U0000f257", # 10%
+      "\U0000f250", # Charging
+      "\U0000e98e", # Speaker ON
+      "\U0000e04f", # Speaker OFF
+    ]
+  - file: "gfonts://Material+Symbols+Outlined"
+    id: font_info_icons_little
+    size: 40
+    glyphs: [
+      "\U0000f654", # Alert
+      "\U0000e63e", # Wifi ON
+      "\U0000e648", # Wifi OFF
+      "\U0000e1ff", # thermometer
+      "\U0000f87e", # water-percent
+      "\U0000e29c", # air
+      "\U0000e834", # check
+      "\U0000e62e", # assistant
+    ]
+
+  - file: "fonts/materialdesignicons-webfont.ttf"
+    id: mdi_icons_52
+    size: 52
+    bpp: 4
+    glyphs: [
+      "\U000F068A", # shield home
+      "\U000F1828", # shield moon
+      "\U000F099D", # shield lock
+      "\U000F06BB", # shield plane
+      "\U000F099E", # shield off
+      "\U000F0498", # shield
+      "\U000F0826", # home
+      "\U000F1A46", # away
+    ]
+
+  - file: "fonts/materialdesignicons-webfont.ttf"
+    id: mdi_icons_68
+    size: 68
+    bpp: 4
+    glyphs: [
+      "\U000F068A", # shield home
+      "\U000F1828", # shield moon
+      "\U000F099D", # shield lock
+      "\U000F06BB", # shield plane
+      "\U000F099E", # shield off
+      "\U000F0498", # shield
+    ]  
+
+  - file: "gfonts://Figtree"
+    id: font_notification
+    size: 70
+    glyphs: ${allowed_characters}
+
+  # Weather
+  # Meteorología
+
+  - file: "gfonts://Material+Symbols+Outlined"
+    id: font_top_icons
+    size: 70
+    glyphs: [
+      "\U0000e81a", # wb_sunny (sol)
+      "\U0000e818", # cloud (nube)
+      "\U0000f176", # umbrella (lluvia)
+      "\U0000e810", # water_drop (gotas)
+      "\U0000e80b", # ac_unit (nieve)
+      "\U0000efd8", # air (viento)
+      "\U0000ea0b", # thunderstorm (tormenta)
+      "\U0000f159", # nights_stay (noche)
+    ]
+
+  - file: "gfonts://Kanit"
+    id: font_info_text
+    size: 35
+    glyphs: ${allowed_characters}
+
+  - file: "gfonts://Material+Symbols+Outlined"
+    id: font_device_icons
+    size: 120
+    glyphs: [
+      "\U0000f02a", # ceiling-light
+      "\U0000f168", # fan
+      "\U0000e286", # blinds-shade
+      "\U0000ec1f", # blinds-shade-close
+      "\U0000ec12", # roller-shade
+      "\U0000ec11", # roller-shade-close
+      "\U0000ed38", # 3d
+      "\U0000ef55", # fire
+      "\U0000efc5", # vacuum
+      "\U0000f7ed", # led-strip
+      "\U0000e97e", # dehumidifier
+      "\U0000e1c4", # play
+      "\U0000e1a2", # pause
+      "\U0000eaaa", # base
+      "\U0000eee1", # locate
+      "\U0000f418", # power
+      "\U0000ef71", # stop
+      "\U0000ebfe", # spotlight
+      "\U0000ef7c", # camera
+      "\U0000e070", # call video
+      " ",
+    ]
+
+  - file: "fonts/Icons.ttf"
+    id: icons_32
+    size: 32
+    bpp: 4
+    glyphs: [
+      "\U0000e900",
+      "\U0000e901",
+      "\U0000e902",
+      "\U0000e903",
+      "\U0000e904",
+      "\U0000e905",
+      "\U0000e906",
+      "\U0000e907",
+      "\U0000e908",
+      "\U0000e909",
+      "\U0000e90a",
+      "\U0000e90b",
+      "\U0000e90c",
+      "\U0000e90d",
+      "\U0000e90e",
+      "\U0000e90f",
+      "\U0000e910",
+      "\U0000e911",
+      "\U0000e912",
+      "\U0000e913",
+      "\U0000e914",
+      "\U0000e915",
+      "\U0000e916",
+      "\U0000e917",
+      "\U0000e918",
+      "\U0000e919",
+
+    ]
+
+  - file: "fonts/materialdesignicons-webfont.ttf"
+    id: mdi_icons_32
+    size: 32
+    bpp: 4
+    glyphs: [
+      "\U000F068A", # shield home
+      "\U000F1828", # shield moon
+      "\U000F099D", # shield lock
+      "\U000F06BB", # shield plane
+      "\U000F099E", # shield off
+      "\U000F0498", # shield
+      "\U000F09A0", # code pin
+      "\U000F0644", # Reconnaissance Facial
+    ]    
+  - file: "fonts/materialdesignicons-webfont.ttf"
+    id: mdi_icons_40
+    size: 40
+    bpp: 4
+    glyphs: [
+      "\U000F068A", # shield home
+      "\U000F1828", # shield moon
+      "\U000F099D", # shield lock
+      "\U000F06BB", # shield plane
+      "\U000F099E", # shield off
+      "\U000F0498", # shield
+    ]
+  - file: "gfonts://Material+Symbols+Outlined"
+    id: font_device_icons_little
+    size: 60
+    glyphs: [
+      "\U0000e879", # exit
+      "\U0000e548", # more
+      "\U0000e834", # check
+      " ",
+    ]
+  - file: "gfonts://Material+Symbols+Outlined"
+    id: font_details_icons
+    size: 60
+    glyphs: [
+      "\U0000e286", # blinds-shade
+      "\U0000ec1f", # blinds-shade-close
+      " ",
+    ]
+  - file:
+      type: gfonts
+      family: ${font_family}
+      weight: 300
+    id: nunito_16
+    size: 16
+    glyphsets:
+      - ${font_glyphsets}
+  - file:
+      type: gfonts
+      family: ${font_family}
+      weight: 300
+    id: nunito_18
+    size: 18
+    glyphsets:
+      - ${font_glyphsets}  
+  - file:
+      type: gfonts
+      family: ${font_family}
+      weight: 300
+    id: nunito_36
+    size: 36
+    glyphsets:
+      - ${font_glyphsets}
+  - file: "gfonts://Kanit"
+    id: font_value
+    size: 60
+    glyphs: ${allowed_characters}
+
+  - file: "gfonts://Kanit"
+    id: font_device_status
+    size: 30
+    glyphs: ${allowed_characters}
+  - file: "gfonts://Kanit"
+    id: font_device_name
+    size: 35
+    glyphs: ${allowed_characters}
+  - file: "gfonts://Kanit"
+    id: font_values
+    size: 30
+    glyphs: ${allowed_characters}    
+switch:
+  - platform: gpio
+    id: wifi_power
+    name: "WiFi Power"
+    pin:
+      pi4ioe5v6408: pi4ioe2
+      number: 0
+    restore_mode: ALWAYS_ON
+
+  - platform: gpio
+    id: usb_5v_power
+    name: "USB Power"
+    pin:
+      pi4ioe5v6408: pi4ioe2
+      number: 3
+
+  - platform: gpio
+    id: quick_charge
+    name: "Quick Charge"
+    pin:
+      pi4ioe5v6408: pi4ioe2
+      number: 5
+      inverted: true
+
+  - platform: gpio
+    id: charge_enable
+    name: "Charge Enable"
+    pin:
+      pi4ioe5v6408: pi4ioe2
+      number: 7
+
+  - platform: gpio
+    id: wifi_antenna_int_ext
+    pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 0
+
+  - platform: gpio
+    id: speaker_enable
+    name: "Speaker Enable"
+    pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 1
+    restore_mode: ALWAYS_ON
+    inverted: False
+
+
+
+  - platform: gpio
+    id: external_5v_power
+    name: "External 5V Power"
+    pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 2
+ 
+  - platform: template
+    name: "LVGL Camera Display"
+    id: lvgl_display_enable_switch
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    turn_on_action:
+      - lambda: |-
+          auto *lvgl_disp = id(camera_display);  
+          if (lvgl_disp != nullptr) {
+            lvgl_disp->set_enabled(true);
+          }
+    turn_off_action:
+      - lambda: |-
+          auto *lvgl_disp = id(camera_display);  
+          if (lvgl_disp != nullptr) {
+            lvgl_disp->set_enabled(false);
+          }
+  #- platform: gpio
+    #id: interrupt_pin_toushsreen
+    #name: "interrupt_pin_toushscreen"
+    #pin:
+      #inverted: true
+      #number: GPIO23
+    #restore_mode: ALWAYS_ON  
+
+
+  - platform: gpio
+    id: cam_rst
+    name: "Camera Reset"
+    pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 6
+    restore_mode: ALWAYS_ON
+    on_turn_on:
+      - delay: 100ms
+      - logger.log: "Camera reset activated"  
+  - platform: ip_camera_viewer
+    id: cam
+    camera_id: security_cam_1
+    restore_mode: ALWAYS_OFF      # PAS ALWAYS_ON  
+
+pi4ioe5v6408:
+  - id: pi4ioe1
+    address: 0x43
+    # 0: O - wifi_antenna_int_ext
+    # 1: O - speaker_enable
+    # 2: O - external_5v_power
+    # 3: NC
+    # 4: O - lcd reset
+    # 5: O - touch panel reset
+    # 6: O - camera reset
+    # 7: I - headphone detect
+  - id: pi4ioe2
+    address: 0x44
+    # 0: O - wifi_power
+    # 1: NC
+    # 2: NC
+    # 3: O - usb_5v_power
+    # 4: O - poweroff pulse
+    # 5: O - quick charge enable (inverted)
+    # 6: I - charging status
+    # 7: O - charge enable
+
+psram:
+  mode: hex
+  speed: 200MHz
+
+output:
+  - platform: ledc
+    pin: GPIO22
+    id: backlight_pwm
+    frequency: 1000Hz
+
+light:
+  - platform: monochromatic
+    output: backlight_pwm
+    id: backlight
+    name: "Backlight"
+    restore_mode: RESTORE_DEFAULT_ON
+
+#touchscreen:
+  #- platform: gt911
+    #reset_pin:
+      #pi4ioe5v6408: pi4ioe1
+      #number: 5
+    #calibration:
+      #x_min: 0
+      #y_max: 720
+      #y_min: 0
+      #x_max: 1280
+    #id: touch_screen
+    #on_touch:
+touchscreen:
+  - platform: gt911
+    id: touch_screen
+    interrupt_pin: GPIO23
+    update_interval: never
+    reset_pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 5
+    calibration:
+      x_min: 0
+      x_max: 720
+      y_min: 0
+      y_max: 1280
+    on_touch:      
+      - lambda: |-
+          ESP_LOGD("touchscreen", "Touch detected at (%d, %d)", touch.x, touch.y);      
+
+      - light.turn_on: backlight          
+    transform:
+      swap_xy: false
+      mirror_x: false
+      mirror_y: false
+
+
+display:
+  - platform: mipi_dsi
+    dimensions:
+      height: 1280
+      width: 720
+    model: M5Stack-Tab5
+    reset_pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 4
+    pixel_mode: 24      
+    #color_order: rgb
+    #rotation: 0          # ← PAS de rotation driver : on teste LVGL/PPA
+
+# --- Image asymétrique (flèche) pour VOIR le sens de rotation ---
+image:
+  - file: "images/slider_indicator.png"
+    id: arrow
+    resize: 220x220
+    type: RGB565
+
+  - file: https://raw.githubusercontent.com/youkorr/lvgl_9.5/claude/jolly-lamport-ERZOC/tests/assets/ppa_rot_test.png
+    id: arrow2
+    resize: 240x240
+    type: RGB565
+  - file: "images/animated.webp"
+    id: animatedweb
+    type: RGB565
+    resize: 1024x600
+
+
+  - file: https://raw.githubusercontent.com/youkorr/lvgl_9.5/claude/jolly-lamport-ERZOC/tests/assets/ppa_rot_test_240x120.png
+    id: arrow3
+    type: RGB565
+    
+globals:
+  - id: step
+    type: int
+    initial_value: '0'    
+
+# --- LVGL avec rotation PPA ---
+lvgl:
+  #full_refresh: true
+  use_ppa: true
+  use_ppa_img: true
+  color_depth: 16
+  #buffer_size: 100%
+  byte_order: little_endian
+  fps_benchmark: true
+  perf_monitor: true
+  rotation: 270     # ← LA rotation à tester (PPA HW)
+  pages:
+    - id: page_test
+      bg_color: 0x101010
+      widgets:
+        - label:
+            id: lbl_state
+            align: TOP_MID
+            text: "img SRM: init"
+            text_color: 0xFFFFFF
+            pad_top: 12
+        - button:
+            id: button_0
+            x: 90
+            y: 140
+            width: 250
+            height: 115
+            bg_color: 0x4F46E5
+            border_width: 2
+            border_color: 0x39FC03
+            radius: 7
+            outline_color: 0xE00040
+            text_color: 0xFFFFFF
+            text_font: montserrat_18
+            on_press:
+                then:
+                  - lvgl.page.show: test_cam
+            widgets:
+              - label:
+                  text: "Button"
+                  text_color: 0xFFFFFF       
+        - image:            
+            id: test_img
+            src: arrow3
+            align: CENTER                 
+        #- lottie:
+            #id: test
+            #file: "lottie/loading_animation.json"
+            #hidden: false
+            #align: CENTER 
+            #width: 512
+            #height: 512  
+         
+        - switch:
+            id: switch_1
+            x: 110
+            y: 288
+            width: 185
+            height: 60
+            state:
+              checked: true
+            bg_color: 0x4B5563
+            indicator:
+              checked:
+                bg_color: 0x10B981
+            knob:
+              bg_color: 0xFFFFFF
+              border_color: 0x9CA3AF
+              border_width: 1
+            on_press:
+                then:
+                  - lvgl.page.show: camera_page              
+    - id: test_cam
+      bg_color: 0x1A1A1A
+      width: 100%
+      height: 100%
+      on_load:
+          - lambda: |-
+              auto canvas = id(cam_canvas);  
+              if (canvas != nullptr) {
+                id(security_cam_1).configure_canvas(canvas);
+              }
+
+      widgets:
+        - canvas:
+            id: cam_canvas
+            width: 800
+            height: 600
+            align: CENTER  
+                # Bouton retour
+        - button:
+            align: TOP_LEFT
+            x: 20
+            y: 20
+            width: 80
+            height: 50
+            radius: 25
+            bg_color: color_steel_blue
+            bg_opa: 80%
+            border_width: 1
+            border_color: color_white
+            on_click:
+              - switch.turn_off: cam
+              - lvgl.page.show: page_test                
+
+            widgets:
+              - label:
+                  align: CENTER
+                  text_font: montserrat_18
+                  text: "Exit"
+                  text_color: color_white
+        - button:
+            align: TOP_MID
+            x: 0
+            y: 50
+            width: 200
+            height: 50
+            radius: 25
+            bg_color: 0x27ae60
+            bg_opa: 80%
+            border_width: 1
+            border_color: color_white
+            on_click:
+              - switch.turn_on: cam
+            widgets:
+              - label:
+                  align: CENTER
+                  text_font: montserrat_18
+                  text_color: color_white
+                  text: "Start Camera"
+        # Bouton stop caméra
+        - button:
+            align: TOP_RIGHT
+            x: -20
+            y: 20
+            width: 100
+            height: 50
+            radius: 25
+            bg_color: 0xe74c3c
+            bg_opa: 80%
+            border_width: 1
+            border_color: color_white
+            on_click:
+              - switch.turn_off: cam
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "STOP"
+                  text_font: montserrat_18
+                  text_color: color_white                
+
+      on_swipe_up:
+        - lambda: 'lv_indev_wait_release(lv_indev_get_act());'
+        - lvgl.page.show: page_test
+        - light.turn_on: 
+            id: backlight
+            flash_length: 50ms    
+# ========== PAGE CAMERA ==========
+    - id: camera_page
+      bg_color: color_slate_blue_gray # Fond noir comme sur la photo
+      on_load:
+        - lambda: |-
+            ESP_LOGI("camera", "Camera page loaded");
+            static bool canvas_configured = false;
+            if (!canvas_configured) {
+              auto canvas = id(camera_canvas);
+              if (canvas != nullptr) {
+                id(camera_display).configure_canvas(canvas);
+                canvas_configured = true;
+                ESP_LOGI("lvgl", "✓ Canvas configured");
+              }
+            }
+
+      widgets:
+        # ===== CANVAS CAMERA (résolution native sans bordure) =====
+        - canvas:
+            id: camera_canvas
+            width: 1100 #480 1280x720
+            height: 700  #390  # Résolution native de la caméra
+            x: 0       
+            y: 0         # En haut
+            bg_color: 0x4682B4
+            border_width: 0
+            radius: 0
+            pad_all: 0
+
+
+        # ===== BOUTONS DIRECTEMENT SUR LA PAGE =====
+        
+        # Bouton START (vert)
+        - button:
+            id: btn_start_streaming
+            width: 120
+            height: 80
+            x: 1120
+            y: 150
+            bg_color: 0x00CC44
+            bg_opa: COVER
+            radius: 10
+            on_click:
+     
+                - switch.turn_on: lvgl_display_enable_switch
+                - lambda: |-
+                    ESP_LOGI("camera", "▶ Démarrage streaming");
+                    if (id(tab5_cam).start_streaming()) {
+                      ESP_LOGI("camera", "✓ Streaming démarré");
+                      lv_obj_set_style_bg_color(id(camera_canvas), lv_color_hex(0x000000), 0);
+                    } else {
+                      ESP_LOGE("camera", "✗ Échec streaming");
+                    }
+            widgets:
+              - label:
+                  text_font: font_device_name
+                  text: "START"
+                  text_color: 0xFFFFFF
+                  text_align: CENTER
+                  align: CENTER
+
+        # Bouton STOP (rouge)
+        - button:
+            id: btn_stop_streaming
+            width: 120
+            height: 80
+            x: 1120
+            y: 270
+            bg_color: 0xFF4444
+            bg_opa: COVER
+            radius: 10
+            on_click:
+              then:
+                - lambda: |-
+                    ESP_LOGI("camera", "■ Arrêt streaming");
+                    id(tab5_cam).stop_streaming();
+                    lv_obj_set_style_bg_color(id(camera_canvas), lv_color_hex(0x4682B4), 0);
+            widgets:
+              - label:
+                  text: "STOP"
+                  text_color: 0xFFFFFF
+                  text_font: font_device_name
+                  text_align: CENTER
+                  align: CENTER
+
+
+        # Bouton BACK (rouge)
+        - button:
+            id: btn_camera_back
+            width: 120
+            height: 80
+            x: 1120
+            y: 400
+            bg_color: 0xFF4444
+            bg_opa: COVER
+            radius: 10
+            on_click:
+              then:
+                - switch.turn_off: lvgl_display_enable_switch
+                - lambda: |-
+                    ESP_LOGI("camera", "Retour accueil");
+                    id(tab5_cam).stop_streaming();
+                - lvgl.page.show: page_test
+            widgets:
+              - label:
+                  text: "BACK"
+                  text_color: 0xFFFFFF
+                  text_font: font_device_name
+                  text_align: CENTER
+                  align: CENTER         
+
+      on_swipe_up:
+        - lambda: 'lv_indev_wait_release(lv_indev_get_act());'
+        - lvgl.page.show: page_test
+        - light.turn_on: 
+            id: backlight
+            flash_length: 50ms 
+            
+
+
+            
